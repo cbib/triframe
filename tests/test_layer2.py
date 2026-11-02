@@ -3,6 +3,7 @@ BVAE example. Ground-truth thresholds validated by hand against
 data(n=2000, seed=0); see conftest.py's data fixture."""
 
 import numpy as np
+import pytest
 
 from triframe.layer2 import (
     frechet_distance, frechet_by_token, cohen_d,
@@ -83,3 +84,36 @@ def test_concentration_by_token_runs(block_data, data, registry):
     conc = concentration_by_token(registry, block_data, data["labels"])
     assert set(conc["token"]) == set(registry.all_subgroups)
     assert (conc["gini"] >= 0).all() and (conc["gini"] <= 1).all()
+
+
+# ---------------------------------------------------------------------------
+# Numerical failure: never a silent 0
+# ---------------------------------------------------------------------------
+
+def test_frechet_nonfinite_covariance_returns_nan_and_warns():
+    a = np.full((20, 3), np.nan)
+    b = np.random.default_rng(0).standard_normal((20, 3))
+    with pytest.warns(UserWarning, match="frechet_distance"):
+        out = frechet_distance(a, b)
+    assert np.isnan(out["cov_term"]) and np.isnan(out["total"])
+
+
+def test_frechet_sqrtm_exception_returns_nan_and_warns(monkeypatch):
+    import scipy.linalg
+    def boom(_):
+        raise np.linalg.LinAlgError("boom")
+    monkeypatch.setattr(scipy.linalg, "sqrtm", boom)
+    x = np.random.default_rng(0).standard_normal((50, 3))
+    with pytest.warns(UserWarning, match="LinAlgError"):
+        out = frechet_distance(x, x + 1)
+    assert np.isnan(out["cov_term"])
+    assert out["mean_term"] == pytest.approx(3.0)
+
+
+def test_frechet_healthy_input_does_not_warn():
+    import warnings
+    x = np.random.default_rng(0).standard_normal((200, 3))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = frechet_distance(x, x * 2)
+    assert np.isfinite(out["total"])

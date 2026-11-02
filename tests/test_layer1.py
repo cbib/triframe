@@ -153,3 +153,39 @@ def test_layer1_result_multi_fold_aggregation():
     raw = {"tok_a": [0.1, 0.2, 0.3]}
     result = Layer1Result.from_raw(raw)
     assert abs(result.aggregated["tok_a"][0] - 0.2) < 1e-9
+
+
+def test_pattern_alignment_heldout_probe_exposes_noise():
+    """High alignment on noise is paired with chance-level held-out AUC."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((2000, 10))
+    y = rng.integers(0, 2, size=2000)
+    out = pattern_alignment(X, y, return_probe_performance=True)
+    assert out["alignment"] > 0.9
+    assert 0.40 < out["heldout_auc"] < 0.60
+
+
+def test_pattern_alignment_heldout_probe_detects_signal():
+    rng = np.random.default_rng(0)
+    y = rng.integers(0, 2, size=2000)
+    X = rng.standard_normal((2000, 5))
+    X[:, 0] += 2.0 * y
+    out = pattern_alignment(X, y, return_probe_performance=True)
+    assert out["heldout_auc"] > 0.9 and out["heldout_accuracy"] > 0.8
+
+
+def test_representation_redundancy_heldout_penalises_overfit():
+    """With d_b close to N, in-sample R² is inflated; held-out is not."""
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((60, 1))
+    b = rng.standard_normal((60, 40))
+    insample = representation_redundancy(a, b, test_frac=0)
+    heldout = representation_redundancy(a, b)
+    assert insample > 0.5 and heldout < 0.1
+
+
+def test_representation_redundancy_heldout_keeps_true_relationship():
+    rng = np.random.default_rng(0)
+    b = rng.standard_normal((1000, 3))
+    a = b @ rng.standard_normal((3, 2)) + 0.1 * rng.standard_normal((1000, 2))
+    assert representation_redundancy(a, b) > 0.95

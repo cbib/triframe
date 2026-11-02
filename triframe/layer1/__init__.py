@@ -222,17 +222,14 @@ def _identity_score_fn(output_value: Any, labels: Any) -> float:
 def representation_redundancy(
     repr_a: Any,
     repr_b: Any,
+    test_frac: float = 0.3,
+    random_state: int = 0,
 ) -> float:
     """
-    R² of a linear regression predicting repr_a from repr_b (per-sample
-    rows, (N, d_a) and (N, d_b)). Symmetric interpretation, not a symmetric
-    value: R² of A~B != R² of B~A in general.
-
-    Use for any pair of representations you want to compare — two token
-    vectors, a token vs. a pooled/global representation, a representation
-    vs. an external variable. High R² means repr_b's information already
-    predicts most of repr_a's variance (redundant); low R² means repr_a
-    carries signal repr_b doesn't capture.
+    Held-out R² of a linear regression predicting repr_a from repr_b
+    (rows (N, d_a), (N, d_b)): fit on a (1 - test_frac) subset, scored on
+    the rest. Asymmetric: R²(A~B) != R²(B~A). test_frac=0 gives the
+    in-sample R² (optimistic when d_b is large relative to N).
     """
     a = _to_numpy(repr_a).reshape(len(repr_a), -1)
     b = _to_numpy(repr_b).reshape(len(repr_b), -1)
@@ -242,10 +239,16 @@ def representation_redundancy(
 
     from sklearn.linear_model import LinearRegression
     from sklearn.metrics import r2_score
+    from sklearn.model_selection import train_test_split
 
-    reg = LinearRegression().fit(b, a)
-    pred = reg.predict(b)
-    return float(r2_score(a, pred))
+    if test_frac <= 0:
+        a_tr = a_te = a
+        b_tr = b_te = b
+    else:
+        b_tr, b_te, a_tr, a_te = train_test_split(
+            b, a, test_size=test_frac, random_state=random_state)
+    reg = LinearRegression().fit(b_tr, a_tr)
+    return float(r2_score(a_te, reg.predict(b_te)))
 
 
 # ---------------------------------------------------------------------------
@@ -256,24 +259,24 @@ def pattern_alignment(
     repr_a: Any,
     labels: Any,
     controlling_for: Optional[Any] = None,
-) -> float:
+    return_probe_performance: bool = False,
+    test_frac: float = 0.3,
+    random_state: int = 0,
+) -> Any:
     """
-    Fits a logistic probe on repr_a (N, d) -> labels (N,), then computes
-    the Haufe et al. 2014 activation pattern from the probe's weight
-    vector w and standardized repr_a's covariance Sigma:
+    Cosine between a logistic probe's weights w and the Haufe (2014)
+    activation pattern a = Sigma w / (w' Sigma w).
 
-        a = (Sigma @ w) / (w^T @ Sigma @ w)
+    Limitation: alignment is high whenever w follows the covariance
+    structure, including when the probe carries no label information
+    (e.g. noise). It does NOT show that repr_a encodes the label; read it
+    together with held-out probe performance.
 
-    and returns cosine_similarity(w, a). This measures whether repr_a's
-    own best class-separating direction (w) agrees with the
-    covariance-corrected pattern (a) — near 1 means w reflects genuine
-    class-conditional structure in repr_a; near 0 or negative means w is
-    partly/wholly a suppressor direction.
-
-    controlling_for : optional (N, d') representation to regress out of
-    repr_a first (residual/orthogonalized alignment — isolates the
-    component of repr_a not already explained by controlling_for). None
-    (default) computes the raw alignment on repr_a as-is.
+    controlling_for : (N, d') representation regressed out of repr_a first.
+    return_probe_performance : if True, fit the probe on a stratified
+        (1 - test_frac) split and return {"alignment", "heldout_auc",
+        "heldout_accuracy"} evaluated on the rest. Default False returns the
+        float alignment fitted on all samples.
     """
     from sklearn.linear_model import LogisticRegression, Ridge
     from sklearn.preprocessing import StandardScaler
@@ -290,12 +293,25 @@ def pattern_alignment(
 
     a_scaled = StandardScaler().fit_transform(a_repr)
 
-    probe = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
-    probe.fit(a_scaled, y)
-    w = probe.coef_[0]
+    def _fit(X, t):
+        probe = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs").fit(X, t)
+        w = probe.coef_[0]
+        sigma = np.cov(X.T).reshape(len(w), len(w))
+        denom = w @ sigma @ w
+        pattern = np.zeros_like(w) if abs(denom) < 1e-12 else (sigma @ w) / denom
+        cos = float(cosine_similarity(w.reshape(1, -1), pattern.reshape(1, -1))[0, 0])
+        return probe, cos
 
-    sigma = np.cov(a_scaled.T)
-    denom = w @ sigma @ w
-    pattern = np.zeros_like(w) if abs(denom) < 1e-12 else (sigma @ w) / denom
+    if not return_probe_performance:
+        return _fit(a_scaled, y)[1]
 
-    return float(cosine_similarity(w.reshape(1, -1), pattern.reshape(1, -1))[0, 0])
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import train_test_split
+    Xtr, Xte, ytr, yte = train_test_split(
+        a_scaled, y, test_size=test_frac, stratify=y, random_state=random_state)
+    probe, cos = _fit(Xtr, ytr)
+    proba = probe.predict_proba(Xte)
+    auc = (float(roc_auc_score(yte, proba[:, 1])) if proba.shape[1] == 2
+           else float(roc_auc_score(yte, proba, multi_class="ovr")))
+    return {"alignment": cos, "heldout_auc": auc,
+            "heldout_accuracy": float((probe.predict(Xte) == yte).mean())}

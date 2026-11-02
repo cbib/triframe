@@ -64,10 +64,11 @@ def frechet_distance(
       mean_term = ||mu_a - mu_b||^2
       cov_term  = total - mean_term
 
-    reg : diagonal regularization added to each covariance for numerical
-    stability (singular/near-singular covariance is common with few
-    samples or highly correlated features).
+    reg : diagonal regularization added to each covariance for stability.
+    On numerical failure cov_term and total are NaN and a UserWarning is
+    raised; a failure is never reported as 0.
     """
+    import warnings
     from scipy.linalg import sqrtm
 
     a = _to_numpy(repr_a).astype(np.float64)
@@ -85,11 +86,18 @@ def frechet_distance(
     mean_term = float(np.sum((mu_a - mu_b) ** 2))
 
     try:
+        if not (np.isfinite(S_a).all() and np.isfinite(S_b).all()):
+            raise FloatingPointError("non-finite covariance")
         S_a_sqrt = sqrtm(S_a).real
         inner = sqrtm(S_a_sqrt @ S_b @ S_a_sqrt).real
+        if not (np.isfinite(S_a_sqrt).all() and np.isfinite(inner).all()):
+            raise FloatingPointError("non-finite matrix square root")
         cov_term = max(float(np.trace(S_a + S_b - 2 * inner)), 0.0)
-    except Exception:
-        cov_term = 0.0
+    except Exception as e:
+        warnings.warn(f"frechet_distance covariance term failed "
+                      f"({type(e).__name__}: {e}); returning NaN", UserWarning,
+                      stacklevel=2)
+        cov_term = float("nan")
 
     return {"total": mean_term + cov_term, "mean_term": mean_term, "cov_term": cov_term}
 
