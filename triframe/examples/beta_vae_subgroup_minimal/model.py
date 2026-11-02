@@ -17,6 +17,10 @@ save_checkpoint()/load_checkpoint() are provided for anyone who wants a
 real trained artifact instead (e.g. a slower CI tier, or to sanity-check
 that triframe's findings still make sense post-training, not just on
 random weights).
+
+Also provided: TwoPathSubgroupModel / TwoPathAdapter, a two-route variant
+(normalised tokens + per-block raw-token summaries) for the multi-path
+adapter contract.
 """
 
 from __future__ import annotations
@@ -46,7 +50,11 @@ class MinimalSubgroupModel(nn.Module):
 
         # One projector PER TOKEN (not per block) — each token must get a
         # genuinely distinct representation, since patching relies on
-        # tokens being independently addressable. 
+        # tokens being independently addressable. A block-shared projector
+        # broadcast across its tokens would make intra-block tokens
+        # functionally identical (patching one would be indistinguishable
+        # from patching another), which defeats the entire premise of
+        # per-token causal intervention.
         self.token_projectors = nn.ModuleDict()
         for block in registry.block_names:
             block_dim = registry.block_dim(block)
@@ -93,6 +101,111 @@ class MinimalAdapter(ModelAdapter):
 
     def get_output_value(self, model_output):
         return model_output["logits"]
+
+
+class TwoPathSubgroupModel(nn.Module):
+    """
+    MinimalSubgroupModel with two token routes to the classifier:
+    (1) flattened normalised tokens; (2) per-block summaries of the raw
+    (pre-token_norm) tokens, weighted by a softmax gate on the normalised
+    tokens.
+    """
+
+    def __init__(self, registry: TokenRegistry, d_proj: int = 8):
+        super().__init__()
+        self.registry = registry
+        self.d_proj = d_proj
+
+        self.token_projectors = nn.ModuleDict()
+        for block in registry.block_names:
+            for sg in registry.block_subgroups(block):
+                idx = registry.indices_for_subgroup(sg)
+                self.token_projectors[sg] = nn.Sequential(
+                    nn.Linear(len(idx), d_proj), nn.ReLU(), nn.Linear(d_proj, d_proj)
+                )
+
+        self.token_norm = nn.LayerNorm(d_proj)
+        self.gate = nn.Linear(d_proj, 1)
+        n_blocks = len(registry.block_names)
+        self.classifier = nn.Sequential(
+            nn.Linear(registry.total_tokens * d_proj + n_blocks * d_proj, 32),
+            nn.ReLU(),
+            nn.Linear(32, 2),
+        )
+
+    def forward(self, block_inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        token_list = []
+        for block in self.registry.block_names:
+            X = block_inputs[block]
+            for sg in self.registry.block_subgroups(block):
+                idx = self.registry.indices_for_subgroup(sg)
+                token_list.append(self.token_projectors[sg](X[:, idx]).unsqueeze(1))
+
+        tokens_raw = torch.cat(token_list, dim=1)                 # (B, N, d_proj)
+        tokens = self.token_norm(tokens_raw)
+        weights = torch.softmax(self.gate(tokens).squeeze(-1), dim=1)   # (B, N)
+
+        summaries, offset = [], 0
+        for block in self.registry.block_names:
+            n = len(self.registry.block_subgroups(block))
+            summaries.append((tokens_raw[:, offset:offset + n]
+                              * weights[:, offset:offset + n].unsqueeze(-1)).sum(dim=1))
+            offset += n
+
+        logits = self.classifier(torch.cat([tokens.flatten(1)] + summaries, dim=1))
+        return {"logits": logits, "tokens": tokens}
+
+
+class TwoPathAdapter(MinimalAdapter):
+    """
+    Patches the raw per-token projector outputs, upstream of both routes
+    (not token_norm, which the inherited get_token_module() returns).
+    """
+
+    def __init__(self, model: TwoPathSubgroupModel):
+        super().__init__(model)
+        reg = model.registry
+        self._token_names = [sg for block in reg.block_names
+                             for sg in reg.block_subgroups(block)]
+        assert self._token_names == list(reg.all_subgroups), (
+            "token concatenation order must match registry.all_subgroups")
+
+    def capture_tokens(self, batch):
+        outputs = {}
+        handles = [
+            self.model.token_projectors[sg].register_forward_hook(
+                lambda m, i, o, sg=sg: outputs.__setitem__(sg, o))
+            for sg in self._token_names
+        ]
+        try:
+            self.run_forward(batch)
+        finally:
+            for h in handles:
+                h.remove()
+        return torch.stack([outputs[sg] for sg in self._token_names], dim=1)
+
+    def run_forward_patched(self, batch, positions, values):
+        positions = list(positions)
+        if values.shape[1] != len(positions):
+            raise ValueError(f"values has {values.shape[1]} columns for "
+                             f"{len(positions)} positions.")
+        handles = [
+            self.model.token_projectors[self._token_names[pos]].register_forward_hook(
+                lambda m, i, o, j=j: values[:, j, :])
+            for j, pos in enumerate(positions)
+        ]
+        try:
+            return self.run_forward(batch)
+        finally:
+            for h in handles:
+                h.remove()
+
+
+def build_two_path_model(registry: TokenRegistry, d_proj: int = 8,
+                         seed: int = 0) -> TwoPathSubgroupModel:
+    """Untrained TwoPathSubgroupModel, fixed random weights via seed."""
+    torch.manual_seed(seed)
+    return TwoPathSubgroupModel(registry, d_proj=d_proj)
 
 
 def build_model(registry: TokenRegistry, d_proj: int = 8, seed: int = 0) -> MinimalSubgroupModel:

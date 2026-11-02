@@ -8,6 +8,12 @@ Core primitive:
   patch_and_forward() — one interchange intervention, one direction:
     substitute a source sample's token vector(s) into a target sample's
     forward pass, return (baseline_output, patched_output).
+    The substitution is carried out by the adapter (capture_tokens() /
+    run_forward_patched()), so it can be applied upstream of EVERY path by
+    which a token reaches the output — see triframe.adapter.
+  check_self_patch_identity() — sanity check for an adapter's pair of
+    intervention methods: patching a sample with its OWN tokens must leave
+    the output unchanged.
 
 Aggregate metrics (built from many patch_and_forward calls over pairs):
   symmetry_score() — natural indirect effect magnitude: how much the
@@ -45,9 +51,10 @@ Quickstart
 ...     adapter, target_batch, source_batch, token_positions=[0, 1])
 >>>
 >>> sym = symmetry_score(adapter, target_batches, source_batches, token_positions=[0])
+>>> def success(base, patched, exp):
+...     return classification_success_fn(base, adapter.get_output_value(patched)[0], exp)
 >>> iia = interchange_intervention_accuracy(
-...     adapter, target_batches, source_batches, token_positions=[0],
-...     expected=target_expected_classes, success_fn=classification_success_fn)
+...     adapter, target_batches, source_batches, [0], expected, success)
 """
 
 from __future__ import annotations
@@ -103,31 +110,40 @@ def patch_and_forward(
     """
     baseline_output = adapter.run_forward(target_batch)
 
-    source_output_holder: Dict[str, Any] = {}
-
-    def _capture_source_tokens(module, inp, output):
-        source_output_holder["tokens"] = output
-
-    capture_handle = adapter.get_token_module().register_forward_hook(_capture_source_tokens)
-    try:
-        adapter.run_forward(source_batch)
-    finally:
-        capture_handle.remove()
-    source_tokens = source_output_holder["tokens"]
-
-    def _patch_hook(module, inp, output):
-        patched = output.clone()
-        for pos in token_positions:
-            patched[:, pos, :] = source_tokens[:, pos, :]
-        return patched
-
-    patch_handle = adapter.get_token_module().register_forward_hook(_patch_hook)
-    try:
-        patched_output = adapter.run_forward(target_batch)
-    finally:
-        patch_handle.remove()
+    # Hook mechanics live in the adapter (see ModelAdapter.capture_tokens).
+    source_tokens = adapter.capture_tokens(source_batch)
+    positions = list(token_positions)
+    values = source_tokens[:, positions, :]
+    patched_output = adapter.run_forward_patched(target_batch, positions, values)
 
     return baseline_output, patched_output
+
+
+def check_self_patch_identity(
+    adapter: ModelAdapter,
+    batch: Any,
+    token_positions: Optional[List[int]] = None,
+    atol: float = 1e-5,
+) -> None:
+    """
+    Assert that patching `batch` with its own captured tokens leaves
+    get_output_value() unchanged (atol). Catches mismatched capture/patch
+    sites and position misalignment; model must be in eval mode.
+
+    token_positions : default = all positions.
+
+    Does not detect an incomplete patch site (a bypassing path).
+    """
+    tokens = adapter.capture_tokens(batch)
+    positions = (list(token_positions) if token_positions is not None
+                 else list(range(tokens.shape[1])))
+    baseline = _to_numpy(adapter.get_output_value(adapter.run_forward(batch)))
+    patched = _to_numpy(adapter.get_output_value(
+        adapter.run_forward_patched(batch, positions, tokens[:, positions, :])))
+    max_err = float(np.max(np.abs(patched - baseline)))
+    assert max_err <= atol, (
+        f"Self-patch identity violated: max |patched - baseline| = "
+        f"{max_err:.3e} > {atol} (positions={positions}).")
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +253,9 @@ def additive_null_iia(single_token_iias: Sequence[float]) -> float:
     IIA_additive(S) = 1 - prod_{i in S} (1 - IIA({i})) — the independence-
     null IIA for a token set S, treating each token's single-token IIA as
     the probability it alone would have flipped the intervention. Compare
-    against the real joint IIA for the same set: joint >> additive is
-    evidence of synergy; joint ~= additive is consistent with independent,
-    non-synergistic contributions.
+    against the real joint IIA for the same set. This is a reference level,
+    not proof of synergy: threshold effects can put joint above it; use
+    additive_output_interaction() for the output-space test.
     """
     p_none = 1.0
     for iia in single_token_iias:
@@ -257,12 +273,14 @@ def greedy_token_search(
     single_token_iia: Dict[str, float],
     iia_fn: Callable[[List[int]], float],
     max_search_depth: int,
+    eval_iia_fn: Optional[Callable[[List[int]], float]] = None,
+    eval_single_token_iia: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Greedily grow a token set: start empty, at each step add whichever
     remaining token most increases joint IIA (per iia_fn, called with the
-    token POSITIONS for the trial set). Stops at max_search_depth or when no
-    addition improves IIA.
+    token POSITIONS for the trial set). Stops at max_search_depth or after a
+    strict decrease in IIA (a plateau continues).
 
     iia_fn : takes a list of GLOBAL TOKEN positions (0-indexed into the
     (B, N_tokens, d_proj) token dimension — i.e. registry.all_subgroups'
@@ -275,7 +293,15 @@ def greedy_token_search(
     iia_joint, iia_additive_expected, delta_vs_additive} — a search-
     derived sufficiency curve, directly comparable to a fixed single/
     block/all curve, but not constrained to any fixed token grouping.
+
+    eval_iia_fn, eval_single_token_iia : optional, both or neither (else
+    ValueError). Held-out counterparts of iia_fn / single_token_iia, never
+    used for selection; when given, each row also has iia_joint_heldout,
+    iia_additive_expected_heldout, delta_vs_additive_heldout.
     """
+    if (eval_iia_fn is None) != (eval_single_token_iia is None):
+        raise ValueError(
+            "Pass both eval_iia_fn and eval_single_token_iia, or neither.")
     current_set: List[str] = []
     remaining = list(all_tokens)
     rows: List[Dict[str, Any]] = []
@@ -305,10 +331,152 @@ def greedy_token_search(
             "iia_joint": best_iia, "iia_additive_expected": expected,
             "delta_vs_additive": best_iia - expected,
         })
+        if eval_iia_fn is not None:
+            held = eval_iia_fn(positions_for(current_set))
+            held_exp = additive_null_iia(
+                [eval_single_token_iia[t] for t in current_set])
+            rows[-1].update({
+                "iia_joint_heldout": held,
+                "iia_additive_expected_heldout": held_exp,
+                "delta_vs_additive_heldout": held - held_exp,
+            })
 
         prev_iia = rows[-2]["iia_joint"] if len(rows) > 1 else 0.0
         if best_iia < prev_iia:
             break  # only a real decrease stops search; a plateau (e.g. all
                    # singles score 0) must continue, next step tests pairs
 
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Output-space interaction test
+# ---------------------------------------------------------------------------
+
+def benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
+    """BH adjusted q-values, same order as input, monotone, capped at 1.
+    NaN stays NaN and is excluded from the number of tests."""
+    p = np.asarray(p_values, dtype=float).ravel()
+    q = np.full(p.shape, np.nan)
+    valid = np.where(~np.isnan(p))[0]
+    m = len(valid)
+    if m == 0:
+        return q
+    order = valid[np.argsort(p[valid], kind="stable")]
+    adj = p[order] * m / np.arange(1, m + 1)
+    adj = np.minimum.accumulate(adj[::-1])[::-1]
+    q[order] = np.minimum(adj, 1.0)
+    return q
+
+
+def _default_score_fn(values: np.ndarray) -> np.ndarray:
+    if values.ndim == 1:
+        return values
+    if values.ndim == 2 and values.shape[1] == 2:
+        return values[:, 1] - values[:, 0]
+    raise ValueError(
+        f"Cannot reduce output of shape {values.shape} to a per-sample "
+        "score; pass score_fn.")
+
+
+def _scores(adapter: ModelAdapter, output: Any, score_fn) -> np.ndarray:
+    values = _to_numpy(adapter.get_output_value(output))
+    fn = score_fn if score_fn is not None else _default_score_fn
+    return np.asarray(_to_numpy(fn(values)), dtype=float).reshape(-1)
+
+
+def additive_output_interaction(
+    adapter: ModelAdapter,
+    target_batch: Any,
+    source_batch: Any,
+    member_positions: List[int],
+    score_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    single_deltas: Optional[Dict[int, np.ndarray]] = None,
+) -> Dict[str, np.ndarray]:
+    """
+    Output-space interaction of patching member_positions (global token
+    positions) together vs. one at a time. score_fn maps the output value
+    to a (B,) score (default: 1-D as is; 2 columns -> col1 - col0).
+    single_deltas : optional {position: (B,) delta} to skip recomputation.
+    Returns {joint_delta, additive_delta, interaction} (B,) arrays,
+    interaction = joint_delta - additive_delta.
+    """
+    base_out, joint_out = patch_and_forward(
+        adapter, target_batch, source_batch, list(member_positions))
+    base = _scores(adapter, base_out, score_fn)
+    joint_delta = _scores(adapter, joint_out, score_fn) - base
+    additive = np.zeros_like(joint_delta)
+    for pos in member_positions:
+        if single_deltas is not None and pos in single_deltas:
+            additive = additive + np.asarray(single_deltas[pos], dtype=float)
+        else:
+            additive = additive + _single_delta(
+                adapter, target_batch, source_batch, pos, score_fn)
+    return {"joint_delta": joint_delta, "additive_delta": additive,
+            "interaction": joint_delta - additive}
+
+
+def _single_delta(adapter, target_batch, source_batch, pos, score_fn):
+    base_out, out = patch_and_forward(adapter, target_batch, source_batch, [pos])
+    return _scores(adapter, out, score_fn) - _scores(adapter, base_out, score_fn)
+
+
+def pairwise_interaction_test(
+    adapter: ModelAdapter,
+    target_batch: Any,
+    source_batch: Any,
+    tokens: List[str],
+    registry: TokenRegistry,
+    score_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    sample_sign: Optional[np.ndarray] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Two-sided t-test of mean output-space interaction = 0 for every
+    unordered token pair, BH-adjusted across pairs. sample_sign (B,) of
+    +1/-1 orients interactions toward the intended flip direction.
+    Returns dicts {token_a, token_b, n, mean_interaction, se, t, p, q}
+    sorted by q ascending; NaN-score samples are dropped per pair.
+    """
+    try:
+        from scipy import stats as _stats
+        two_sided_p = lambda t, df: float(2 * _stats.t.sf(abs(t), df))
+    except ImportError:
+        from math import erfc, sqrt
+        two_sided_p = lambda t, df: float(erfc(abs(t) / sqrt(2)))
+
+    order = registry.all_subgroups
+    pos = {tok: order.index(tok) for tok in tokens}
+    singles = {pos[tok]: _single_delta(adapter, target_batch, source_batch,
+                                       pos[tok], score_fn) for tok in tokens}
+    sign = None if sample_sign is None else np.asarray(sample_sign, dtype=float)
+
+    rows: List[Dict[str, Any]] = []
+    for i in range(len(tokens)):
+        for j in range(i + 1, len(tokens)):
+            a, b = tokens[i], tokens[j]
+            inter = additive_output_interaction(
+                adapter, target_batch, source_batch, [pos[a], pos[b]],
+                score_fn=score_fn, single_deltas=singles)["interaction"]
+            if sign is not None:
+                inter = inter * sign
+            inter = inter[~np.isnan(inter)]
+            n = len(inter)
+            mean = float(np.mean(inter)) if n else float("nan")
+            sd = float(np.std(inter, ddof=1)) if n > 1 else float("nan")
+            se = sd / np.sqrt(n) if n > 1 else float("nan")
+            if n > 1 and se > 0:
+                t = mean / se
+                p = two_sided_p(t, n - 1)
+            elif n > 1:  # zero variance: exactly zero mean is not evidence
+                t = 0.0 if mean == 0 else float("inf")
+                p = 1.0 if mean == 0 else 0.0
+            else:
+                t, p = float("nan"), float("nan")
+            rows.append({"token_a": a, "token_b": b, "n": n,
+                         "mean_interaction": mean, "se": float(se),
+                         "t": float(t), "p": p})
+    qs = benjamini_hochberg([r["p"] for r in rows])
+    for r, q in zip(rows, qs):
+        r["q"] = float(q)
+    rows.sort(key=lambda r: (np.isnan(r["q"]), r["q"]))
     return rows

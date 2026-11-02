@@ -43,6 +43,15 @@ Quickstart
 Everything else in triframe (Layer 1/2/3 functions) takes a ModelAdapter
 instance, not your raw model, so this is the only integration point you
 need to write.
+
+Multi-path models
+-----------------
+get_token_module() assumes one module is the only route from tokens to
+output. If the model also reads the tokens elsewhere (e.g. pooled raw tokens
+fed to the classifier), override capture_tokens() and run_forward_patched()
+so the patch lands upstream of every path. Both must use the same token
+space. See examples/beta_vae_subgroup_minimal/model.py (TwoPathAdapter) and
+layer3.check_self_patch_identity().
 """
 
 from __future__ import annotations
@@ -55,12 +64,14 @@ import torch.nn as nn
 
 class ModelAdapter(ABC):
     """
-    Minimal contract triframe needs from your model. Implement all three
-    methods; the rest of triframe only ever talks to your model through
+    Minimal contract triframe needs from your model. Implement run_forward and get_output_value, 
+    plus get_token_module for single-path models; the rest of triframe only ever talks to your model through
     this interface.
+
+    get_token_module() is only needed for the default capture_tokens() /
+    run_forward_patched().
     """
 
-    @abstractmethod
     def get_token_module(self) -> nn.Module:
         """
         Return the nn.Module whose forward output IS the token tensor,
@@ -71,8 +82,14 @@ class ModelAdapter(ABC):
         after your model builds its token representations — whichever
         module's output tensor has one row per token, in the same order
         as your TokenRegistry.all_subgroups.
+
+        Required by the default capture_tokens()/run_forward_patched();
+        valid only if this output is the sole route from tokens to output.
         """
-        raise NotImplementedError
+        raise NotImplementedError(
+            "This adapter does not implement get_token_module(). Implement it "
+            "(single-path models), or override capture_tokens() and "
+            "run_forward_patched() (multi-path models).")
 
     @abstractmethod
     def run_forward(self, batch: Any) -> Any:
@@ -96,6 +113,53 @@ class ModelAdapter(ABC):
         to you and should stay consistent across calls.
         """
         raise NotImplementedError
+
+    def capture_tokens(self, batch: Any) -> Any:
+        """
+        Return tokens (B, N_tokens, d_proj) for `batch`, in the space
+        run_forward_patched() patches.
+
+        Default: hook on get_token_module(). Override together with
+        run_forward_patched() for multi-path models.
+        """
+        holder: dict = {}
+
+        def _capture(module, inp, output):
+            holder["tokens"] = output
+
+        handle = self.get_token_module().register_forward_hook(_capture)
+        try:
+            self.run_forward(batch)
+        finally:
+            handle.remove()
+        return holder["tokens"]
+
+    def run_forward_patched(self, batch: Any, positions: Any, values: Any) -> Any:
+        """
+        Forward pass on `batch` with tokens at `positions` replaced by
+        `values` (B, len(positions), d_proj); column j replaces positions[j].
+        Returns run_forward()'s output.
+
+        Default: hook on get_token_module(). Override together with
+        capture_tokens() so the patch reaches every downstream path.
+        """
+        positions = list(positions)
+        if values.shape[1] != len(positions):
+            raise ValueError(
+                f"values has {values.shape[1]} columns for "
+                f"{len(positions)} positions.")
+
+        def _patch(module, inp, output):
+            patched = output.clone()
+            for j, pos in enumerate(positions):
+                patched[:, pos, :] = values[:, j, :]
+            return patched
+
+        handle = self.get_token_module().register_forward_hook(_patch)
+        try:
+            return self.run_forward(batch)
+        finally:
+            handle.remove()
 
     def get_attention_weights(self, model_output: Any) -> Any:
         """

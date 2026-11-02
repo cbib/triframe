@@ -190,3 +190,40 @@ def test_greedy_search_discovers_synergy_pair(trained_synergy_adapter, registry)
     assert final_joint_iia > 0.9, "joint IIA on the synergy pair should be near 1.0"
 
     assert rows[1]["delta_vs_additive"] > 0.1, "should show a clear positive synergy signal"
+
+
+# ---------------------------------------------------------------------------
+# Integration: dict-returning adapter + classification_success_fn
+# ---------------------------------------------------------------------------
+
+def test_iia_with_classification_success_fn_needs_output_extraction(
+        untrained_adapter, data, registry):
+    """Raw dict outputs are rejected by the preset; a wrapper that extracts
+    the (n_classes,) scores makes the pieces work together and agrees with a
+    manual computation."""
+    from triframe.presets import classification_success_fn
+
+    batch = to_block_inputs(data, registry)
+    n = 8
+    targets = [{k: v[i:i + 1] for k, v in batch.items()} for i in range(n)]
+    sources = [{k: v[100 + i:101 + i] for k, v in batch.items()} for i in range(n)]
+    expected = [int(i % 2) for i in range(n)]
+
+    # adapter returns a dict, so the preset alone must fail loudly
+    with pytest.raises(TypeError, match="dict"):
+        interchange_intervention_accuracy(
+            untrained_adapter, targets, sources, [0], expected,
+            classification_success_fn)
+
+    def success_fn(baseline_out, patched_out, exp):
+        scores = untrained_adapter.get_output_value(patched_out)[0]
+        return classification_success_fn(baseline_out, scores, exp)
+
+    iia = interchange_intervention_accuracy(
+        untrained_adapter, targets, sources, [0], expected, success_fn)
+
+    manual = np.mean([
+        int(untrained_adapter.get_output_value(
+            patch_and_forward(untrained_adapter, t, s, [0])[1])[0].argmax()) == e
+        for t, s, e in zip(targets, sources, expected)])
+    assert iia == pytest.approx(float(manual))
