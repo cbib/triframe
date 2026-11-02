@@ -9,3 +9,8 @@ dist/
 *.so
 .DS_Store
 .ipynb_checkpoints/
+.vscode/
+
+# data files
+scenario_data/
+validation_out/
