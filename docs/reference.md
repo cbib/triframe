@@ -159,11 +159,23 @@ synergy: threshold effects can put the joint IIA above it. Use
 `shuffled_null_control` to check that IIA reflects pair-specific structure.
 
 ```python
-from triframe.layer3 import noise_null_control, selection_frequency
+from triframe.layer3 import (noise_null_control, selection_frequency, patch_deltas,
+                             net_effect_symmetry, interchange_intervention_accuracy)
 
 # IIA when the patched tokens are noise matched to the target batch. At or
 # above the matched IIA means off-manifold sensitivity, not source content.
 noise_iia = noise_null_control(adapter, target_batches, [0, 1], expected, success_fn)
+# Norm-matched variant: random direction, same L2 norm as the source token.
+noise_iia = noise_null_control(adapter, target_batches, [0, 1], expected, success_fn,
+                               mode="norm_matched", source_batches=source_batches)
+
+# IIA over pairs whose baseline is valid only (e.g. not already on the target side):
+interchange_intervention_accuracy(adapter, tgt, src, [0, 1], expected, success_fn,
+                                  valid_fn=lambda base_out, exp: ...)
+
+# Per-pair deltas, and a direction-aware net effect (signs cancel within a direction):
+d_ab = patch_deltas(adapter, batch_a, batch_b, [0, 1])
+net_effect_symmetry(d_ab, d_ba)   # {"symmetry_score", "causal_effect"}
 
 # Report matched minus control, not matched alone.
 # Greedy search: which token is chosen at each step, across folds.

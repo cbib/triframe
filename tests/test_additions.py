@@ -164,3 +164,67 @@ def test_zero_fill_shortcut_is_flagged_by_the_screen_not_by_values():
     out = label_association_screen(pd.concat([z, s], axis=1), y).set_index("column")
     assert out.loc["z1", "flagged"] and not out.loc["s1", "flagged"]
     assert abs(out.loc["z1", "auc_zero"] - 0.5) > 0.3 and abs(out.loc["z1", "auc_value"] - 0.5) < 0.1
+
+
+def _flip_success(base, patched, exp):
+    return float((patched["logits"].argmax(1) == exp).mean())
+
+
+def test_noise_norm_matched_has_source_norm_and_leaves_unused_token_alone():
+    from triframe.layer3 import noise_null_control
+    rng = np.random.default_rng(5)
+    ad = _ToyAdapter()
+    tgt = {"t": rng.standard_normal((300, 3, 2)) * 2}
+    src = {"t": rng.standard_normal((300, 3, 2)) * 2}
+    exp = 1 - ad.get_output_value(ad.run_forward(tgt)).argmax(1)
+    seen = {}
+    orig = ad.run_forward_patched
+    ad.run_forward_patched = lambda b, p, v: (seen.update(v=np.array(v)), orig(b, p, v))[1]
+    used = noise_null_control(ad, [tgt], [0, 1], [exp], _flip_success, seed=1,
+                              mode="norm_matched", source_batches=[src])
+    assert np.allclose(np.linalg.norm(seen["v"], axis=-1),
+                       np.linalg.norm(src["t"][:, [0, 1], :], axis=-1))
+    unused = noise_null_control(ad, [tgt], [2], [exp], _flip_success, seed=1,
+                                mode="norm_matched", source_batches=[src])
+    assert unused == 0.0 and used > 0.2
+
+
+def test_noise_norm_matched_requires_sources():
+    import pytest
+    from triframe.layer3 import noise_null_control
+    with pytest.raises(ValueError):
+        noise_null_control(_ToyAdapter(), [{"t": np.zeros((2, 3, 2))}], [0],
+                           [np.zeros(2)], _flip_success, mode="norm_matched")
+
+
+def test_iia_valid_fn_drops_invalid_pairs_from_denominator():
+    from triframe.layer3 import interchange_intervention_accuracy
+    ad = _ToyAdapter()
+    rng = np.random.default_rng(6)
+    # four size-1 pairs: two start in class 0 (valid), two in class 1 (invalid)
+    tgt = [{"t": np.full((1, 3, 2), v)} for v in (-1.0, -1.0, 1.0, 1.0)]
+    src = [{"t": np.full((1, 3, 2), 1.0)} for _ in range(4)]
+    exp = [1, 1, 1, 1]
+    succ = lambda b, p, e: float(p["logits"].argmax(1)[0] == e)
+    valid = lambda b, e: int(b["logits"].argmax(1)[0]) != e
+    allp = interchange_intervention_accuracy(ad, tgt, src, [0, 1], exp, succ)
+    onlyv = interchange_intervention_accuracy(ad, tgt, src, [0, 1], exp, succ, valid_fn=valid)
+    assert allp == 1.0 and onlyv == 1.0
+    none = interchange_intervention_accuracy(
+        ad, tgt, src, [0, 1], exp, succ, valid_fn=lambda b, e: False)
+    assert np.isnan(none)
+
+
+def test_patch_deltas_and_net_effect_symmetry():
+    from triframe.layer3 import net_effect_symmetry, patch_deltas
+    ad = _ToyAdapter()
+    rng = np.random.default_rng(7)
+    a = {"t": rng.standard_normal((50, 3, 2))}
+    b = {"t": rng.standard_normal((50, 3, 2))}
+    d = patch_deltas(ad, a, b, [0, 1], value_fn=lambda o: o["logits"][:, 1])
+    assert d.shape == (50,)
+    assert np.allclose(patch_deltas(ad, a, b, [2], value_fn=lambda o: o["logits"][:, 1]), 0)
+    out = net_effect_symmetry([2.0, -2.0, 1.0], [-1.0])
+    # ab mean = 1/3, ba mean = -1: signs cancel within a direction
+    assert np.isclose(out["symmetry_score"], (1 / 3 + 1) / 2)
+    assert np.isclose(out["causal_effect"], (1 / 3 + 1) / 2)

@@ -194,29 +194,55 @@ def interchange_intervention_accuracy(
     token_positions: List[int],
     expected: Sequence[Any],
     success_fn: SuccessFn,
+    valid_fn: Optional[Callable[[Any, Any], bool]] = None,
 ) -> float:
     """
-    Stricter than symmetry_score: fraction of (target, source) pairs where
-    the intervention succeeded per success_fn(baseline_out, patched_out,
-    expected_i). success_fn is entirely yours to define — see
-    triframe.presets.classification_success_fn for the ready
-    "did the patched prediction match the expected class" version.
+    Fraction of (target, source) pairs where success_fn(baseline_out,
+    patched_out, expected_i) is true. See
+    triframe.presets.classification_success_fn for a ready success_fn.
 
-    target_batches, source_batches, expected : paired sequences, same
-    length.
+    target_batches, source_batches, expected : paired sequences, same length.
+    valid_fn : optional (baseline_out, expected_i) -> bool. Pairs where it is
+        false are dropped from numerator and denominator (e.g. keep only
+        targets the model already places on the expected side's opposite
+        class). NaN if no pair is valid.
     """
     successes = []
     for target_batch, source_batch, exp in zip(target_batches, source_batches, expected):
         baseline_out, patched_out = patch_and_forward(
             adapter, target_batch, source_batch, token_positions)
+        if valid_fn is not None and not valid_fn(baseline_out, exp):
+            continue
         successes.append(success_fn(baseline_out, patched_out, exp))
-
     return float(np.mean(successes)) if successes else float("nan")
 
 
-# ---------------------------------------------------------------------------
-# Shuffled-null control
-# ---------------------------------------------------------------------------
+def patch_deltas(
+    adapter: ModelAdapter,
+    target_batch: Any,
+    source_batch: Any,
+    token_positions: List[int],
+    value_fn: Optional[Callable[[Any], Any]] = None,
+) -> np.ndarray:
+    """Per-pair change (patched - baseline) of value_fn(output), shape (B,)
+    or (B, k). value_fn defaults to adapter.get_output_value."""
+    value_fn = value_fn or adapter.get_output_value
+    base, patched = patch_and_forward(adapter, target_batch, source_batch,
+                                      token_positions)
+    return _to_numpy(value_fn(patched)) - _to_numpy(value_fn(base))
+
+
+def net_effect_symmetry(deltas_ab: Any, deltas_ba: Any) -> Dict[str, float]:
+    """
+    Direction-aware effect from per-pair deltas of the two swap directions
+    (a->b, b->a): symmetry_score = (|mean ab| + |mean ba|) / 2 (signed
+    effects cancel within a direction), causal_effect = (mean ab - mean ba) / 2.
+    Differs from symmetry_score(), which is mean |delta|.
+    """
+    ab, ba = float(np.mean(deltas_ab)), float(np.mean(deltas_ba))
+    return {"symmetry_score": (abs(ab) + abs(ba)) / 2,
+            "causal_effect": (ab - ba) / 2}
+
 
 def shuffled_null_control(
     adapter: ModelAdapter,
@@ -251,24 +277,41 @@ def noise_null_control(
     expected: Sequence[Any],
     success_fn: SuccessFn,
     seed: int = 0,
+    mode: str = "gaussian",
+    source_batches: Optional[Sequence[Any]] = None,
 ) -> float:
     """
-    IIA with the patched tokens replaced by Gaussian noise (per-position,
-    per-dimension mean and std taken from each target batch) instead of a
-    source sample's tokens. A value at or above the matched IIA means the
-    patch effect is off-manifold sensitivity, not source-specific content.
+    IIA with the patched tokens replaced by noise instead of a source
+    sample's tokens. A value at or above the matched IIA means the effect is
+    off-manifold sensitivity, not source-specific content.
 
+    mode="gaussian"    : per-position, per-dimension mean/std of each target
+                         batch.
+    mode="norm_matched": random isotropic direction with the L2 norm of the
+                         matching source token (needs source_batches, paired
+                         with target_batches).
     target_batches, expected : paired sequences, same length.
     """
+    if mode not in ("gaussian", "norm_matched"):
+        raise ValueError("mode must be 'gaussian' or 'norm_matched'")
+    if mode == "norm_matched" and (source_batches is None
+                                   or len(source_batches) != len(target_batches)):
+        raise ValueError("norm_matched needs source_batches paired with target_batches")
     rng = np.random.default_rng(seed)
     positions = list(token_positions)
     successes = []
-    for target_batch, exp in zip(target_batches, expected):
+    for i, (target_batch, exp) in enumerate(zip(target_batches, expected)):
         baseline_out = adapter.run_forward(target_batch)
         ref = adapter.capture_tokens(target_batch)
         tokens = _to_numpy(ref)[:, positions, :]
-        noise = (tokens.mean(0, keepdims=True)
-                 + tokens.std(0, keepdims=True) * rng.standard_normal(tokens.shape))
+        if mode == "gaussian":
+            noise = (tokens.mean(0, keepdims=True)
+                     + tokens.std(0, keepdims=True) * rng.standard_normal(tokens.shape))
+        else:
+            src = _to_numpy(adapter.capture_tokens(source_batches[i]))[:, positions, :]
+            d = rng.standard_normal(src.shape)
+            d /= np.maximum(np.linalg.norm(d, axis=-1, keepdims=True), 1e-12)
+            noise = d * np.linalg.norm(src, axis=-1, keepdims=True)
         noise = ref.new_tensor(noise) if hasattr(ref, "new_tensor") else noise.astype(tokens.dtype)
         patched_out = adapter.run_forward_patched(target_batch, positions, noise)
         successes.append(success_fn(baseline_out, patched_out, exp))
