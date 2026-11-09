@@ -117,9 +117,10 @@ def frechet_by_token(
 
     block_data : {block_name: (N, block_dim) raw feature matrix}, matching
                  registry column order for that block.
-    standardize : z-score each block's features before computing distance
-                 (recommended — puts features on comparable scale so the
-                 result isn't dominated by raw units).
+    standardize : z-score each block's features before computing distance.
+    Output columns: token, block, n_features, frechet_dist, frechet_per_dim
+    (= frechet_dist / n_features; compare groups of different size on this
+    one, since frechet_dist grows with feature count), mean_term, cov_term.
     """
     from sklearn.preprocessing import StandardScaler
 
@@ -138,12 +139,14 @@ def frechet_by_token(
         for token in registry.block_subgroups(block_name):
             idx = registry.indices_for_subgroup(token)
             if not idx:
-                rows.append(dict(token=token, block=block_name,
-                                 frechet_dist=0.0, mean_term=0.0, cov_term=0.0))
+                rows.append(dict(token=token, block=block_name, n_features=0,
+                                 frechet_dist=0.0, frechet_per_dim=0.0,
+                                 mean_term=0.0, cov_term=0.0))
                 continue
             result = frechet_distance(X[mask_a][:, idx], X[mask_b][:, idx], reg=reg)
-            rows.append(dict(token=token, block=block_name,
+            rows.append(dict(token=token, block=block_name, n_features=len(idx),
                              frechet_dist=result["total"],
+                             frechet_per_dim=result["total"] / len(idx),
                              mean_term=result["mean_term"],
                              cov_term=result["cov_term"]))
 

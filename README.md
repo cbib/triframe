@@ -27,7 +27,10 @@ in another). triframe puts three kinds of evidence side by side:
 - **Layer 2 high, Layer 3 low:** the group is informative, but the model does
   not rely on it (another group covers for it, say).
 - **Layer 2 low, Layer 3 high:** the model uses the group although it does not
-  separate the classes alone (a noise suppressor, or an interaction).
+  separate the classes alone (a noise suppressor, or an interaction), or it
+  uses a shortcut such as a zero or missing-value pattern that tracks the
+  label. Run `triframe.audit.label_association_screen` on the group's
+  features before reading it as biology.
 
 **Which layer do I need?** No trained model yet: Layer 2. A trained model: add
 Layers 1 and 3. Layer 3 is the only one that tests what the model needs.

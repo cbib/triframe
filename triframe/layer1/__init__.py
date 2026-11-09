@@ -123,6 +123,30 @@ def aggregate_attention(
     return Layer1Result.from_raw(raw)
 
 
+def attention_entropy(
+    adapter: ModelAdapter,
+    registry: TokenRegistry,
+    batches: Sequence[Any],
+) -> List[float]:
+    """
+    Normalised attention entropy per batch: mean over rows of
+    H(row) / ln(n_tokens). 1.0 = uniform over tokens (attention carries no
+    token preference); near 0 = concentrated. Requires
+    adapter.get_attention_weights().
+    """
+    n_tokens = registry.total_tokens
+    out: List[float] = []
+    for batch in batches:
+        w = _to_numpy(adapter.get_attention_weights(adapter.run_forward(batch)))
+        if w.shape[-1] != n_tokens:
+            raise ValueError(
+                f"get_attention_weights() last dim {w.shape[-1]} != {n_tokens} tokens")
+        p = np.clip(w.reshape(-1, n_tokens), 1e-12, None)
+        p = p / p.sum(axis=1, keepdims=True)
+        out.append(float((-(p * np.log(p)).sum(axis=1)).mean() / np.log(n_tokens)))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Ablation
 # ---------------------------------------------------------------------------
@@ -141,6 +165,7 @@ def run_ablation(
     zero_fn: ZeroFn,
     mode: str = "feature_zero",
     score_fn: Optional[Callable[[Any, Any], float]] = None,
+    token_sets: Optional[Dict[str, List[str]]] = None,
 ) -> Layer1Result:
     """
     For each token, zero its contribution (via zero_fn) in each batch,
@@ -179,8 +204,13 @@ def run_ablation(
               triframe.presets.classification_accuracy_fn and pass it
               explicitly.
 
-    Returns score DROP (baseline - ablated) per token, so a positive
-    value means ablating that token hurt performance.
+    token_sets : optional {name: [tokens]}. When given, each set is ablated
+              together (zero_fn gets the whole list) and results are keyed
+              by set name instead of by single token. Use for blocks or
+              redundant groups, which single-token ablation understates.
+
+    Returns score DROP (baseline - ablated) per token (or set), so a
+    positive value means ablating it hurt performance.
     """
     if mode not in ("feature_zero", "token_zero"):
         raise ValueError(f"mode must be 'feature_zero' or 'token_zero', got '{mode}'")
@@ -188,19 +218,20 @@ def run_ablation(
     if score_fn is None:
         score_fn = _identity_score_fn
 
-    subgroups = registry.all_subgroups
-    raw: Dict[str, List[float]] = {sg: [] for sg in subgroups}
+    units = (dict(token_sets) if token_sets is not None
+             else {sg: [sg] for sg in registry.all_subgroups})
+    raw: Dict[str, List[float]] = {name: [] for name in units}
 
     for batch, batch_labels in zip(batches, labels):
         baseline_output = adapter.run_forward(batch)
         baseline_score = score_fn(adapter.get_output_value(baseline_output), batch_labels)
 
-        for sg in subgroups:
-            ablated_batch = zero_fn(batch, [sg], registry)
+        for name, members in units.items():
+            ablated_batch = zero_fn(batch, list(members), registry)
             ablated_output = adapter.run_forward(ablated_batch)
             ablated_score = score_fn(adapter.get_output_value(ablated_output), batch_labels)
 
-            raw[sg].append(baseline_score - ablated_score)
+            raw[name].append(baseline_score - ablated_score)
 
     return Layer1Result.from_raw(raw)
 

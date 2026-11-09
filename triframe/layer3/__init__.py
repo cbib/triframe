@@ -244,6 +244,37 @@ def shuffled_null_control(
     )
 
 
+def noise_null_control(
+    adapter: ModelAdapter,
+    target_batches: Sequence[Any],
+    token_positions: List[int],
+    expected: Sequence[Any],
+    success_fn: SuccessFn,
+    seed: int = 0,
+) -> float:
+    """
+    IIA with the patched tokens replaced by Gaussian noise (per-position,
+    per-dimension mean and std taken from each target batch) instead of a
+    source sample's tokens. A value at or above the matched IIA means the
+    patch effect is off-manifold sensitivity, not source-specific content.
+
+    target_batches, expected : paired sequences, same length.
+    """
+    rng = np.random.default_rng(seed)
+    positions = list(token_positions)
+    successes = []
+    for target_batch, exp in zip(target_batches, expected):
+        baseline_out = adapter.run_forward(target_batch)
+        ref = adapter.capture_tokens(target_batch)
+        tokens = _to_numpy(ref)[:, positions, :]
+        noise = (tokens.mean(0, keepdims=True)
+                 + tokens.std(0, keepdims=True) * rng.standard_normal(tokens.shape))
+        noise = ref.new_tensor(noise) if hasattr(ref, "new_tensor") else noise.astype(tokens.dtype)
+        patched_out = adapter.run_forward_patched(target_batch, positions, noise)
+        successes.append(success_fn(baseline_out, patched_out, exp))
+    return float(np.mean(successes)) if successes else float("nan")
+
+
 # ---------------------------------------------------------------------------
 # Additive-independence null (for synergy testing)
 # ---------------------------------------------------------------------------
@@ -349,6 +380,26 @@ def greedy_token_search(
     return rows
 
 
+def selection_frequency(rows_by_fold: Sequence[List[Dict[str, Any]]]):
+    """
+    How often each token is chosen at each greedy step across folds.
+    rows_by_fold : one greedy_token_search() result per fold.
+    Returns a DataFrame (index = step, columns = tokens, values = share of
+    folds that chose the token at that step). Read only the steps where one
+    token dominates; later steps are fold-specific.
+    """
+    import pandas as pd
+    n = len(rows_by_fold)
+    counts: Dict[int, Dict[str, int]] = {}
+    for rows in rows_by_fold:
+        for r in rows:
+            step_counts = counts.setdefault(r["step"], {})
+            step_counts[r["added_token"]] = step_counts.get(r["added_token"], 0) + 1
+    out = pd.DataFrame(counts).T.sort_index().fillna(0.0) / max(n, 1)
+    out.index.name = "step"
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Output-space interaction test
 # ---------------------------------------------------------------------------
@@ -429,6 +480,7 @@ def pairwise_interaction_test(
     registry: TokenRegistry,
     score_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     sample_sign: Optional[np.ndarray] = None,
+    clusters: Optional[Sequence[Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Two-sided t-test of mean output-space interaction = 0 for every
@@ -436,6 +488,9 @@ def pairwise_interaction_test(
     +1/-1 orients interactions toward the intended flip direction.
     Returns dicts {token_a, token_b, n, mean_interaction, se, t, p, q}
     sorted by q ascending; NaN-score samples are dropped per pair.
+    clusters : optional (B,) cluster id per sample (e.g. gene). Uses a
+    cluster-robust standard error and t with n_clusters - 1 degrees of
+    freedom instead of treating samples as independent.
     """
     try:
         from scipy import stats as _stats
@@ -449,6 +504,7 @@ def pairwise_interaction_test(
     singles = {pos[tok]: _single_delta(adapter, target_batch, source_batch,
                                        pos[tok], score_fn) for tok in tokens}
     sign = None if sample_sign is None else np.asarray(sample_sign, dtype=float)
+    cl = None if clusters is None else np.asarray(clusters)
 
     rows: List[Dict[str, Any]] = []
     for i in range(len(tokens)):
@@ -459,15 +515,25 @@ def pairwise_interaction_test(
                 score_fn=score_fn, single_deltas=singles)["interaction"]
             if sign is not None:
                 inter = inter * sign
-            inter = inter[~np.isnan(inter)]
+            keep = ~np.isnan(inter)
+            inter = inter[keep]
             n = len(inter)
             mean = float(np.mean(inter)) if n else float("nan")
-            sd = float(np.std(inter, ddof=1)) if n > 1 else float("nan")
-            se = sd / np.sqrt(n) if n > 1 else float("nan")
-            if n > 1 and se > 0:
+            df = n - 1
+            if cl is not None and n > 1:
+                _, inv = np.unique(cl[keep], return_inverse=True)
+                g = int(inv.max()) + 1
+                df = g - 1
+                sums = np.bincount(inv, weights=inter - mean)
+                se = (np.sqrt(g / (g - 1) * np.sum(sums ** 2)) / n
+                      if g > 1 else float("nan"))
+            else:
+                sd = float(np.std(inter, ddof=1)) if n > 1 else float("nan")
+                se = sd / np.sqrt(n) if n > 1 else float("nan")
+            if n > 1 and df >= 1 and se > 0:
                 t = mean / se
-                p = two_sided_p(t, n - 1)
-            elif n > 1:  # zero variance: exactly zero mean is not evidence
+                p = two_sided_p(t, df)
+            elif n > 1 and df >= 1:  # zero variance: exactly zero mean is not evidence
                 t = 0.0 if mean == 0 else float("inf")
                 p = 1.0 if mean == 0 else 0.0
             else:

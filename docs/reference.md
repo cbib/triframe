@@ -79,6 +79,23 @@ r2 = representation_redundancy(token_a, z)
 `run_ablation`'s `score_fn` defaults to an identity function that does not
 assume classification; `triframe.presets` has classification versions.
 
+```python
+from triframe.layer1 import attention_entropy
+from triframe.presets import make_ablation_fn
+
+# Removal that stays on-distribution: "mean" or "permute" instead of zeros.
+zero_fn = make_ablation_fn("permute", seed=0)
+
+# Ablate groups together (blocks, redundant groups); single-group ablation
+# understates groups that another group can cover for.
+res = run_ablation(adapter, registry, [batch], [labels], zero_fn,
+                   score_fn=classification_accuracy_fn,
+                   token_sets={"block_a": registry.block_subgroups("a")})
+
+# 1.0 = attention uniform over tokens: attention weights carry no preference.
+attention_entropy(adapter, registry, [batch])
+```
+
 ## Layer 2: associational
 
 ```python
@@ -88,7 +105,8 @@ from triframe.layer2 import frechet_by_token, concentration_by_token
 # mean and covariance terms. A failed covariance computation gives NaN and
 # a warning, never 0.
 fd = frechet_by_token(registry, block_data={"block": X}, labels=y)
-fd[["token", "frechet_dist", "mean_term", "cov_term"]]
+fd[["token", "n_features", "frechet_dist", "frechet_per_dim", "mean_term", "cov_term"]]
+# frechet_dist grows with feature count; rank groups of different size by frechet_per_dim.
 
 # Is a group's signal concentrated in a few features, or diffuse?
 conc = concentration_by_token(registry, block_data={"block": X}, labels=y)
@@ -139,6 +157,33 @@ The independence reference from `greedy_token_search` is not proof of
 synergy: threshold effects can put the joint IIA above it. Use
 `pairwise_interaction_test` for the output-space test, and
 `shuffled_null_control` to check that IIA reflects pair-specific structure.
+
+```python
+from triframe.layer3 import noise_null_control, selection_frequency
+
+# IIA when the patched tokens are noise matched to the target batch. At or
+# above the matched IIA means off-manifold sensitivity, not source content.
+noise_iia = noise_null_control(adapter, target_batches, [0, 1], expected, success_fn)
+
+# Report matched minus control, not matched alone.
+# Greedy search: which token is chosen at each step, across folds.
+selection_frequency([rows_fold0, rows_fold1, ...])
+
+# Cluster-robust interaction test (e.g. clusters = gene id per sample):
+pairwise_interaction_test(adapter, target_batch, source_batch, tokens, registry,
+                          clusters=gene_ids)
+```
+
+## Input audit
+
+```python
+from triframe.audit import label_association_screen
+
+# Zero/NaN rate per class and indicator AUC per feature column; run before
+# interpreting any model. labels in {0, 1}.
+screen = label_association_screen(X_df, y)
+screen[screen.flagged]
+```
 
 ## Pairing and plotting
 
