@@ -194,7 +194,7 @@ def interchange_intervention_accuracy(
     token_positions: List[int],
     expected: Sequence[Any],
     success_fn: SuccessFn,
-    valid_fn: Optional[Callable[[Any, Any], bool]] = None,
+    valid_fn: Optional[Callable[[Any, Any], Any]] = None,
 ) -> float:
     """
     Fraction of (target, source) pairs where success_fn(baseline_out,
@@ -202,19 +202,28 @@ def interchange_intervention_accuracy(
     triframe.presets.classification_success_fn for a ready success_fn.
 
     target_batches, source_batches, expected : paired sequences, same length.
-    valid_fn : optional (baseline_out, expected_i) -> bool. Pairs where it is
-        false are dropped from numerator and denominator (e.g. keep only
-        targets the model already places on the expected side's opposite
-        class). NaN if no pair is valid.
+    success_fn : returns a bool/float for the batch, or a (B,) array with one
+        entry per pair (then every pair counts once).
+    valid_fn : optional (baseline_out, expected_i) -> bool or (B,) bool array.
+        Pairs where it is false are dropped from numerator and denominator.
+        A (B,) result needs a (B,) success_fn result. NaN if no pair is valid.
     """
     successes = []
     for target_batch, source_batch, exp in zip(target_batches, source_batches, expected):
         baseline_out, patched_out = patch_and_forward(
             adapter, target_batch, source_batch, token_positions)
-        if valid_fn is not None and not valid_fn(baseline_out, exp):
-            continue
-        successes.append(success_fn(baseline_out, patched_out, exp))
-    return float(np.mean(successes)) if successes else float("nan")
+        succ = np.atleast_1d(_to_numpy(success_fn(baseline_out, patched_out, exp))).astype(float)
+        if valid_fn is not None:
+            ok = np.atleast_1d(_to_numpy(valid_fn(baseline_out, exp))).astype(bool)
+            if ok.size == 1:
+                ok = np.repeat(ok, succ.size)
+            if ok.size != succ.size:
+                raise ValueError("valid_fn and success_fn must return the same "
+                                 "number of entries per batch")
+            succ = succ[ok]
+        successes.append(succ)
+    allv = np.concatenate(successes) if successes else np.array([])
+    return float(allv.mean()) if allv.size else float("nan")
 
 
 def patch_deltas(

@@ -228,3 +228,20 @@ def test_patch_deltas_and_net_effect_symmetry():
     # ab mean = 1/3, ba mean = -1: signs cancel within a direction
     assert np.isclose(out["symmetry_score"], (1 / 3 + 1) / 2)
     assert np.isclose(out["causal_effect"], (1 / 3 + 1) / 2)
+
+
+def test_iia_accepts_per_pair_arrays_and_valid_masks():
+    from triframe.layer3 import interchange_intervention_accuracy
+    ad = _ToyAdapter()
+    # one batch of 4 pairs: targets start in class 0,0,1,1; sources all class 1
+    tgt = [{"t": np.array([[[-1.0, -1]] * 3, [[-1.0, -1]] * 3,
+                           [[1.0, 1]] * 3, [[1.0, 1]] * 3])}]
+    src = [{"t": np.full((4, 3, 2), 1.0)}]
+    succ = lambda b, p, e: p["logits"].argmax(1) == e
+    valid = lambda b, e: b["logits"].argmax(1) != e
+    assert interchange_intervention_accuracy(ad, tgt, src, [0, 1], [1], succ) == 1.0
+    # mix: patch only token 2 (ignored by the toy model) -> nothing flips
+    nothing = interchange_intervention_accuracy(ad, tgt, src, [2], [1], succ, valid_fn=valid)
+    assert nothing == 0.0          # 2 valid pairs (class 0), none flip
+    assert np.isnan(interchange_intervention_accuracy(
+        ad, tgt, src, [2], [1], succ, valid_fn=lambda b, e: np.zeros(4, bool)))
