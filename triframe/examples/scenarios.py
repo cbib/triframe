@@ -92,6 +92,17 @@ def _s7(n, rng):
     return X, y
 
 
+def _s8(n, rng, keep=0.1):
+    """Z is real-valued only for a `keep` share of class 0 (the rest is
+    zero-filled), always real for class 1: a missingness shortcut."""
+    y, s = _labels(rng, n)
+    z = rng.standard_normal((n, D_FEAT))
+    z[(y == 0) & (rng.random(n) > keep)] = 0.0
+    X = {"S": 0.5 * s[:, None] + rng.standard_normal((n, D_FEAT)), "Z": z,
+         **_noise(rng, n)}
+    return X, y
+
+
 def _truth(tokens, info, used):
     return ({t: t in info for t in tokens}, {t: t in used for t in tokens})
 
@@ -230,3 +241,8 @@ if __name__ == "__main__":
     ap.add_argument("--scenarios", nargs="*")
     a = ap.parse_args()
     export(a.out, a.seed, a.scenarios)
+
+def shortcut_scenario() -> Scenario:
+    """Zero-fill shortcut (not in SCENARIOS: trained-model behaviour is
+    unchecked). Z's label information is missingness, not value."""
+    return _mk("shortcut", ["S", "Z"], {"S", "Z"}, {"S", "Z"}, _s8)

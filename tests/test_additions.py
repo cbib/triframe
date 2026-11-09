@@ -154,3 +154,13 @@ def test_label_association_screen_flags_zero_shortcut():
     assert out.loc["shortcut", "flagged"]
     assert not out.loc["noise", "flagged"] and not out.loc["signal", "flagged"]
     assert out.loc["signal", "auc_value"] > 0.7
+
+
+def test_zero_fill_shortcut_is_flagged_by_the_screen_not_by_values():
+    from triframe.examples.scenarios import shortcut_scenario
+    X, y = shortcut_scenario().gen(4000, np.random.default_rng(0))
+    z = pd.DataFrame(X["Z"], columns=["z1", "z2", "z3"])
+    s = pd.DataFrame(X["S"], columns=["s1", "s2", "s3"])
+    out = label_association_screen(pd.concat([z, s], axis=1), y).set_index("column")
+    assert out.loc["z1", "flagged"] and not out.loc["s1", "flagged"]
+    assert abs(out.loc["z1", "auc_zero"] - 0.5) > 0.3 and abs(out.loc["z1", "auc_value"] - 0.5) < 0.1

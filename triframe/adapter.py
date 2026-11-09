@@ -57,9 +57,10 @@ layer3.check_self_patch_identity().
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import torch.nn as nn
+if TYPE_CHECKING:  # torch is only needed by your own adapter
+    import torch.nn as nn
 
 
 class ModelAdapter(ABC):

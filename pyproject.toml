@@ -33,12 +33,13 @@ dependencies = [
     "scipy>=1.9",
     "scikit-learn>=1.1",
     "matplotlib>=3.6",
-    "torch>=1.13"
 ]
 
 [project.optional-dependencies]
+torch = ["torch>=1.13"]
 dev = [
     "pytest>=7.0",
+    "torch>=1.13",
 ]
 
 [project.urls]

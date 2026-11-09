@@ -188,8 +188,12 @@ screen[screen.flagged]
 ## Pairing and plotting
 
 ```python
-from triframe.pairing import nearest_neighbor
-pairs = nearest_neighbor(embedding, group_a_mask, group_b_mask, max_dist=0.2)
+from triframe.pairing import nearest_neighbor, pair_balance, same_group_partners
+pairs = nearest_neighbor(embedding, group_a_mask, group_b_mask,
+                         calipers=(0.2, 0.05))      # per-column limits
+pair_balance(embedding, pairs)                      # |SMD| < 0.1 = balanced
+# control: same-group sources instead of matched ones
+src = same_group_partners(group_a_mask, [a for a, _ in pairs])  # then shuffled_null_control
 
 from triframe.plotting import ranked_bar, stacked_bar, sufficiency_curve
 fig, ax = ranked_bar(labels=fd["token"], values=fd["frechet_dist"],
