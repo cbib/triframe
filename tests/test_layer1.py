@@ -189,3 +189,19 @@ def test_representation_redundancy_heldout_keeps_true_relationship():
     b = rng.standard_normal((1000, 3))
     a = b @ rng.standard_normal((3, 2)) + 0.1 * rng.standard_normal((1000, 2))
     assert representation_redundancy(a, b) > 0.95
+
+def test_representation_redundancy_ridge_clip_options_match_manual():
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import r2_score
+    from sklearn.preprocessing import StandardScaler
+    from triframe.layer1 import representation_redundancy
+    rng = np.random.default_rng(0)
+    z = rng.standard_normal((300, 4))
+    a = np.c_[z @ rng.standard_normal((4, 2)), rng.standard_normal((300, 1))]
+    zs = StandardScaler().fit_transform(z)
+    pred = Ridge(alpha=1.0).fit(zs, a).predict(zs)
+    want = np.clip(r2_score(a, pred, multioutput="raw_values"), 0, 1).mean()
+    got = representation_redundancy(a, z, test_frac=0, alpha=1.0, clip_per_dim=True)
+    assert abs(got - want) < 1e-12
+    assert representation_redundancy(a, z) == representation_redundancy(
+        a, z, alpha=0.0, clip_per_dim=False)
