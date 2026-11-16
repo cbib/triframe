@@ -31,6 +31,7 @@ Quickstart
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -55,6 +56,7 @@ def frechet_distance(
     repr_a: Any,
     repr_b: Any,
     reg: float = 1e-4,
+    rel_tol: float = 1e-6,
 ) -> Dict[str, float]:
     """
     Wasserstein-2 (Frechet) distance between two Gaussians fit to repr_a,
@@ -65,6 +67,8 @@ def frechet_distance(
       cov_term  = total - mean_term
 
     reg : diagonal regularization added to each covariance for stability.
+    rel_tol : failure threshold, relative to trace(Sa)+trace(Sb), for an
+        imaginary part or a negative covariance term.
     On numerical failure cov_term and total are NaN and a UserWarning is
     raised; a failure is never reported as 0.
     """
@@ -85,14 +89,22 @@ def frechet_distance(
 
     mean_term = float(np.sum((mu_a - mu_b) ** 2))
 
+    scale = float(np.trace(S_a) + np.trace(S_b)) or 1.0
     try:
         if not (np.isfinite(S_a).all() and np.isfinite(S_b).all()):
             raise FloatingPointError("non-finite covariance")
-        S_a_sqrt = sqrtm(S_a).real
-        inner = sqrtm(S_a_sqrt @ S_b @ S_a_sqrt).real
+        S_a_sqrt = sqrtm(S_a)
+        inner = sqrtm(S_a_sqrt @ S_b @ S_a_sqrt)
         if not (np.isfinite(S_a_sqrt).all() and np.isfinite(inner).all()):
             raise FloatingPointError("non-finite matrix square root")
-        cov_term = max(float(np.trace(S_a + S_b - 2 * inner)), 0.0)
+        imag = max(float(np.abs(np.imag(S_a_sqrt)).max()),
+                   float(np.abs(np.imag(inner)).max()))
+        if imag > rel_tol * scale:
+            raise FloatingPointError(f"imaginary part {imag:.2e}")
+        cov_term = float(np.trace(S_a + S_b - 2 * np.real(inner)))
+        if cov_term < -rel_tol * scale:
+            raise FloatingPointError(f"negative covariance term {cov_term:.2e}")
+        cov_term = max(cov_term, 0.0)
     except Exception as e:
         warnings.warn(f"frechet_distance covariance term failed "
                       f"({type(e).__name__}: {e}); returning NaN", UserWarning,
@@ -139,9 +151,11 @@ def frechet_by_token(
         for token in registry.block_subgroups(block_name):
             idx = registry.indices_for_subgroup(token)
             if not idx:
+                warnings.warn(f"frechet_by_token: no features for token {token}; NaN")
+                nan = float("nan")
                 rows.append(dict(token=token, block=block_name, n_features=0,
-                                 frechet_dist=0.0, frechet_per_dim=0.0,
-                                 mean_term=0.0, cov_term=0.0))
+                                 frechet_dist=nan, frechet_per_dim=nan,
+                                 mean_term=nan, cov_term=nan))
                 continue
             result = frechet_distance(X[mask_a][:, idx], X[mask_b][:, idx], reg=reg)
             rows.append(dict(token=token, block=block_name, n_features=len(idx),
@@ -150,7 +164,8 @@ def frechet_by_token(
                              mean_term=result["mean_term"],
                              cov_term=result["cov_term"]))
 
-    return pd.DataFrame(rows).sort_values("frechet_dist", ascending=False)
+    return pd.DataFrame(rows).sort_values(
+        "frechet_dist", ascending=False, na_position="last")
 
 
 # ---------------------------------------------------------------------------

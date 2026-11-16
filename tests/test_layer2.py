@@ -110,6 +110,18 @@ def test_frechet_sqrtm_exception_returns_nan_and_warns(monkeypatch):
     assert out["mean_term"] == pytest.approx(3.0)
 
 
+def test_frechet_by_token_empty_token_is_nan_and_warns(block_data, data, registry, monkeypatch):
+    tok = registry.block_subgroups(registry.block_names[0])[0]
+    orig = registry.indices_for_subgroup
+    monkeypatch.setattr(registry, "indices_for_subgroup",
+                        lambda t: [] if t == tok else orig(t))
+    with pytest.warns(UserWarning, match="no features"):
+        fd = frechet_by_token(registry, block_data, data["labels"])
+    row = fd[fd["token"] == tok].iloc[0]
+    assert row["n_features"] == 0 and np.isnan(row["frechet_dist"])
+    assert fd.iloc[-1]["token"] == tok, "NaN rows sort last"
+
+
 def test_frechet_healthy_input_does_not_warn():
     import warnings
     x = np.random.default_rng(0).standard_normal((200, 3))

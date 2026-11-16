@@ -255,12 +255,16 @@ def representation_redundancy(
     repr_b: Any,
     test_frac: float = 0.3,
     random_state: int = 0,
+    alpha: float = 0.0,
+    clip_per_dim: bool = False,
 ) -> float:
     """
     Held-out R² of a linear regression predicting repr_a from repr_b
     (rows (N, d_a), (N, d_b)): fit on a (1 - test_frac) subset, scored on
     the rest. Asymmetric: R²(A~B) != R²(B~A). test_frac=0 gives the
     in-sample R² (optimistic when d_b is large relative to N).
+    alpha > 0 : ridge penalty on standardized repr_b (0 = OLS).
+    clip_per_dim : per-dimension (1-D) R², clipped to [0, 1], then averaged.
     """
     a = _to_numpy(repr_a).reshape(len(repr_a), -1)
     b = _to_numpy(repr_b).reshape(len(repr_b), -1)
@@ -268,9 +272,10 @@ def representation_redundancy(
         raise ValueError(f"repr_a and repr_b must have the same number of "
                          f"samples, got {a.shape[0]} and {b.shape[0]}")
 
-    from sklearn.linear_model import LinearRegression
+    from sklearn.linear_model import LinearRegression, Ridge
     from sklearn.metrics import r2_score
     from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
 
     if test_frac <= 0:
         a_tr = a_te = a
@@ -278,8 +283,15 @@ def representation_redundancy(
     else:
         b_tr, b_te, a_tr, a_te = train_test_split(
             b, a, test_size=test_frac, random_state=random_state)
-    reg = LinearRegression().fit(b_tr, a_tr)
-    return float(r2_score(a_te, reg.predict(b_te)))
+    if alpha > 0:
+        scaler = StandardScaler().fit(b_tr)
+        b_tr, b_te = scaler.transform(b_tr), scaler.transform(b_te)
+    reg = (Ridge(alpha=alpha) if alpha > 0 else LinearRegression()).fit(b_tr, a_tr)
+    pred = reg.predict(b_te)
+    if clip_per_dim:
+        r2 = np.array([r2_score(a_te[:, d], pred[:, d]) for d in range(a_te.shape[1])])
+        return float(np.clip(r2, 0.0, 1.0).mean())
+    return float(r2_score(a_te, pred))
 
 
 # ---------------------------------------------------------------------------
