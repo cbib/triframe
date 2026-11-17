@@ -253,90 +253,6 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
                    agreement=("agree", "mean"), n=("agree", "size")).reset_index())
 
 
-def plot(summary: pd.DataFrame, path: Path):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 8), sharey=True)
-    for ax, (q, methods, title) in zip(axes, [
-            ("label_info", INFO_METHODS, "Contains label information?"),
-            ("model_use", USE_METHODS, "Does the model use it?")]):
-        s = summary[summary.question == q]
-        rows = list(dict.fromkeys(summary.row))
-        M = np.full((len(rows), len(methods)), np.nan)
-        T = [[""] * len(methods) for _ in rows]
-        for _, r in s.iterrows():
-            i, j = rows.index(r.row), methods.index(r.method)
-            M[i, j] = r.agreement
-            T[i][j] = f"{r.flagged_rate:.0%}"
-        ax.imshow(M, vmin=0, vmax=1, cmap="Blues", aspect="auto")
-        for i in range(len(rows)):
-            for j in range(len(methods)):
-                if T[i][j]:
-                    ax.text(j, i, T[i][j], ha="center", va="center", fontsize=8,
-                            color="white" if M[i, j] > 0.6 else "#222")
-        ax.set_xticks(range(len(methods)), methods, rotation=35, ha="right")
-        ax.set_title(title, fontsize=11)
-        truth = s.drop_duplicates("row").set_index("row").truth
-        ax.set_yticks(range(len(rows)), [f"{r}  [{'yes' if truth.get(r, False) else 'no'}]"
-                                         for r in rows], fontsize=8)
-    fig.suptitle("Darker = agrees with ground truth in more seeds; text = % of seeds flagged; "
-                 "[yes/no] = ground truth", fontsize=9)
-    fig.tight_layout()
-    fig.savefig(path, dpi=160)
-    plt.close(fig)
-
-
-def plot_real_data(bc_mlp: pd.DataFrame, bc_rf: pd.DataFrame, digits: pd.DataFrame, path: Path):
-    """Flagged rate (share of seeds) per group and method for the real-data
-    examples. No ground truth except the injected noise groups."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    def rates(df, q):
-        d = df[(df.question == q) & ~df.joint]
-        return d.pivot_table(index="group", columns="method", values="flagged", sort=False)
-
-    fig = plt.figure(figsize=(15, 9.5))
-    top = fig.add_gridspec(1, 2, top=0.90, bottom=0.50, wspace=0.75, left=0.12, right=0.97)
-    for k, (name, df) in enumerate([("Breast cancer, MLP", bc_mlp), ("Breast cancer, random forest", bc_rf)]):
-        ax = fig.add_subplot(top[0, k])
-        use, info = rates(df, "model_use"), rates(df, "label_info")
-        M = pd.concat([info, use], axis=1)
-        ax.imshow(M.values, vmin=0, vmax=1, cmap="Blues", aspect="auto")
-        for i in range(M.shape[0]):
-            for j in range(M.shape[1]):
-                ax.text(j, i, f"{M.values[i, j]:.0%}", ha="center", va="center", fontsize=7,
-                        color="white" if M.values[i, j] > 0.6 else "#222")
-        ax.set_xticks(range(M.shape[1]), M.columns, rotation=40, ha="right", fontsize=7)
-        ax.set_yticks(range(M.shape[0]), [{"noise": "noise (known unused)",
-                                           "worst_copy": "worst_copy (copy of worst)"}.get(g, g)
-                                          for g in M.index], fontsize=8)
-        ax.axvline(info.shape[1] - 0.5, color="#888", lw=1)
-        ax.set_title(f"{name}\nlabel information | model use", fontsize=9)
-    methods = ["ablation", "patch_flip", "grad_x_input", "integrated_gradients", "attention"]
-    use = rates(digits, "model_use")
-    bot = fig.add_gridspec(1, 5, top=0.36, bottom=0.04, wspace=0.25, left=0.06, right=0.97)
-    for k, m in enumerate(methods):
-        ax = fig.add_subplot(bot[0, k])
-        grid = np.array([[use.loc[f"p{r}{c}", m] for c in range(4)] for r in range(4)])
-        ax.imshow(grid, vmin=0, vmax=1, cmap="Blues")
-        for r in range(4):
-            for c in range(4):
-                ax.text(c, r, f"{grid[r, c]:.0%}", ha="center", va="center", fontsize=8,
-                        color="white" if grid[r, c] > 0.6 else "#222")
-        n = use.loc[["n1", "n2"], m].mean()
-        ax.set_title(f"{m}\n(noise patches: {n:.0%})", fontsize=9)
-        ax.set_xticks([]); ax.set_yticks([])
-        if k == 0:
-            ax.set_ylabel("digits: 4x4 grid of 2x2 image patches", fontsize=8)
-    fig.suptitle("Real-data examples: share of seeds in which each group is flagged", fontsize=11)
-    fig.savefig(path, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-
-
 def run_real_data(seeds: int, out: Path):
     """Breast cancer (MLP, random forest) and digits (transformer)."""
     from . import breast_cancer, digits_vit
@@ -345,7 +261,8 @@ def run_real_data(seeds: int, out: Path):
            "digits_vit": digits_vit.run_all(seeds, jobs=2)}
     for name, d in dfs.items():
         d.to_csv(out / f"real_{name}.csv", index=False)
-    plot_real_data(*dfs.values(), out / "real_data_flagged.png")
+    from .figures import render
+    render(out, out, which=("real",))
 
 
 def main():
@@ -365,7 +282,8 @@ def main():
     df.to_csv(out / "validation_scores.csv", index=False)
     summ = summarize(df)
     summ.to_csv(out / "validation_summary.csv", index=False)
-    plot(summ, out / "validation_agreement.png")
+    from .figures import render
+    render(out, out, which=("scenarios",))
     acc = df.drop_duplicates(["scenario", "seed"]).groupby("scenario").test_accuracy.agg(["mean", "std"])
     acc.to_csv(out / "model_test_accuracy.csv")
     print(acc.round(3))
