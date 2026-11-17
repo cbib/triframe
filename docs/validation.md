@@ -329,7 +329,7 @@ Patching and ablation agree on most patches. Integrated gradients flags more
 peripheral patches. Attention separates patches poorly: weights range only
 from 0.035 to 0.074 and only one patch is flagged in more than 30% of seeds.
 
-![triframe on handwritten digits with a vision transformer that reads each 8x8 image as a 4x4 grid of 2x2-pixel patches.](docs/figures/real_digits_patches.png)
+![triframe on handwritten digits with a vision transformer that reads each 8x8 image as a 4x4 grid of 2x2-pixel patches.](figures/real_digits_patches.png)
 
 *Noise (all three examples).* The reference noise groups cannot be flagged by
 construction. The held-out groups can, and a few are: see section 7.
@@ -396,7 +396,7 @@ figure: supplementary noise-validation figure.
 | Digits | held out | 20 | GB probe 1/20; others 0/20 |
 | Digits | cross-fit | 20 | 0/20 for every method |
 
-![False-positive rates on noise groups the decision rule was not calibrated on.](docs/figures/noise_validation.png)
+![False-positive rates on noise groups the decision rule was not calibrated on.](figures/noise_validation.png)
 
 What this means: on the large synthetic and digits data the rule's false-positive
 rate is low (at most 5% for any method, mostly 0). On breast cancer, with only
