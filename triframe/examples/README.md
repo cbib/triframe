@@ -16,7 +16,7 @@ Run all commands from the repository root with triframe installed
 | Scenario benchmark | methods compared on the seven scenarios, 10 seeds | `python -m triframe.examples.validation --seeds 10 --out validation_out` | 20 min |
 | Breast cancer | plain MLP and random forest on real data | `python -m triframe.examples.breast_cancer --seeds 10 --out validation_out` | 3 min |
 | Digits | small vision transformer, ten classes | `python -m triframe.examples.digits_vit --seeds 10 --out validation_out` | 8 min |
-| All real-data examples + figure | the three examples above and `real_data_flagged.png` | `python -m triframe.examples.validation --real --seeds 10 --out validation_out` | 10 min |
+| All real-data examples + figure | the three examples above and `real_breast_cancer.png` | `python -m triframe.examples.validation --real --seeds 10 --out validation_out` | 10 min |
 
 `docs/validation.md` explains the scenarios, the tests and the results.
 
@@ -24,7 +24,9 @@ Run all commands from the repository root with triframe installed
 
 - `scenarios.py`: the seven scenarios (data generators with ground truth),
   the small token model with attention, and its training.
-- `validation.py`: the benchmark, decision rule, summary table and figures.
+- `validation.py`: the benchmark, decision rule and summary table.
+- `noise_validation.py`: false-positive validation on held-out and cross-fit noise.
+- `figures.py`: draws the figures and writes their caption texts from the output CSVs.
 - `breast_cancer.py`: the breast-cancer data, plain MLP, random forest, and
   `InputGroupAdapter`.
 - `digits_vit.py`: the digits data, the transformer, and its adapter.
@@ -37,8 +39,10 @@ Run all commands from the repository root with triframe installed
 `validation_scores.csv` (every score for every seed), `validation_summary.csv`,
 `validation_agreement.png`, `model_test_accuracy.csv` (scenarios);
 `real_breast_cancer_mlp.csv`, `real_breast_cancer_rf.csv`, `real_digits_vit.csv`,
-`real_data_flagged.png` (real data). In the score files, `flagged` is the
-decision rule's output for that group, method and seed.
+`real_breast_cancer.png` (real data). In the score files, `flagged` is the
+decision rule's output for that group, method and seed. `noise_validation.csv`
+and `noise_validation.png` hold the false-positive rates on held-out and
+cross-fit noise.
 
 ## Using the pattern on your own model
 

@@ -112,7 +112,9 @@ data the four corner patches carry label information together (AUC 0.87), yet
 replacing them barely changes predictions; the four centre patches are the ones
 the model uses.
 
-![Share of seeds in which each group is flagged, real-data examples](docs/figures/real_data_flagged.png)
+![Agreement of triframe flags with designed ground truth in the seven scenarios](docs/figures/validation_agreement.png)
+
+![Share of seeds in which each group is flagged, breast-cancer example](docs/figures/real_breast_cancer.png)
 
 Tests, results and every command to reproduce them are in
 [`docs/validation.md`](docs/validation.md).
