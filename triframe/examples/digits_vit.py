@@ -1,10 +1,13 @@
 """Third example: a small vision-transformer-style model on the scikit-learn
 digits (8x8 images, 10 classes). Each 2x2 patch is one feature group
 (16 groups, 4 pixels each), plus two injected pure-noise patches (n1, n2)
-that serve as known-unused references. Corner patches are nearly blank, so
+that serve as known-unused references and two more (n3, n4) held out: never part
+of the reference, so their flag rate is a false-positive rate. Corner patches are nearly blank, so
 they are expected to matter little, but this is not guaranteed."""
 
 from __future__ import annotations
+
+import time
 
 import math
 from typing import List
@@ -21,17 +24,18 @@ from .validation import flag, label_info_scores, model_use_scores
 GRID, P = 4, 2                     # 4x4 patches of 2x2 pixels
 IMG = [f"p{r}{c}" for r in range(GRID) for c in range(GRID)]
 NOISE_PATCHES = ["n1", "n2"]
-NAMES = IMG + NOISE_PATCHES
+HELDOUT_PATCHES = ["n3", "n4"]
+NAMES = IMG + NOISE_PATCHES + HELDOUT_PATCHES
 N_TOK = len(NAMES)
 EXTRA = {("p11", "p12", "p21", "p22"): "centre", ("p00", "p03", "p30", "p33"): "corners"}
 
 
 def _to_patch_order(img: np.ndarray, rng) -> np.ndarray:
-    """(n, 64) row-major pixels -> (n, 72): each patch's 4 pixels contiguous,
-    then 2 noise patches drawn like the pixels (uniform on [0, 1])."""
+    """(n, 64) row-major pixels -> (n, 4 * N_TOK): each patch's 4 pixels contiguous,
+    then the noise patches drawn like the pixels (uniform on [0, 1])."""
     n = len(img)
     p = img.reshape(n, GRID, P, GRID, P).transpose(0, 1, 3, 2, 4).reshape(n, GRID * GRID * P * P)
-    return np.concatenate([p, rng.uniform(0, 1, (n, len(NOISE_PATCHES) * P * P))], 1)
+    return np.concatenate([p, rng.uniform(0, 1, (n, (len(NOISE_PATCHES) + len(HELDOUT_PATCHES)) * P * P))], 1)
 
 
 def load(seed: int):
@@ -134,17 +138,22 @@ def fit(Xtr, ytr, seed, epochs=300, lr=3e-3, wd=1e-2, val_frac=0.2):
     return ViTAdapter(m.eval())
 
 
-def run(seed: int) -> pd.DataFrame:
+def run(seed: int, say=None) -> pd.DataFrame:
+    """say(text): optional status callback, called at the start of each step."""
+    say = say or (lambda text: None)
     torch.set_num_threads(1)          # thread count changes float summation order
     Xtr, ytr, Xte, yte = load(seed)
     reg = build_registry()
+    say("training transformer")
     adapter = fit(Xtr, ytr, seed)
     bte = {"x": torch.tensor(Xte, dtype=torch.float32)}
     with torch.no_grad():
         acc = float((adapter.run_forward(bte)["logits"].argmax(1).numpy() == yte).mean())
     groups = [(t,) for t in NAMES] + list(EXTRA)
+    say("model-use scores (ablation, patching, attention, gradients)")
     use = model_use_scores(adapter, reg, bte, yte, torch.tensor(Xtr, dtype=torch.float32).mean(0),
                            groups, seed)
+    say("label-information scores (Fréchet, Cohen's d, probes)")
     Gtr, Gte = per_group(Xtr), per_group(Xte)
     rows = []
     for g in groups:
@@ -153,19 +162,34 @@ def run(seed: int) -> pd.DataFrame:
             for m, v in sc.items():
                 rows.append(dict(scenario="digits_vit", seed=seed, group="+".join(g),
                                  is_noise=g[0] in NOISE_PATCHES, joint=len(g) > 1,
+                                 heldout=len(g) == 1 and g[0] in HELDOUT_PATCHES,
                                  question=q, method=m, score=v,
-                                 truth=False if g[0] in NOISE_PATCHES else np.nan,
+                                 truth=False if g[0] in NOISE_PATCHES + HELDOUT_PATCHES else np.nan,
                                  test_accuracy=acc))
     return pd.DataFrame(rows)
 
 
+def _run_logged(seed: int, seeds: int) -> pd.DataFrame:
+    """run(seed) with status lines labelled by seed (usable in worker processes)."""
+    from .validation import stage
+    label = f"digits seed {seed + 1}/{seeds}"
+    return run(seed, say=lambda t: stage(label, t))
+
+
 def run_all(seeds: int = 10, jobs: int = 1) -> pd.DataFrame:
+    from .validation import progress
+    parts, t0 = [], time.time()
     if jobs > 1:
-        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         with ProcessPoolExecutor(jobs) as ex:
-            parts = list(ex.map(run, range(seeds)))
+            for f in as_completed([ex.submit(_run_logged, s, seeds) for s in range(seeds)]):
+                parts.append(f.result())
+                progress("digits", len(parts), seeds, t0)
     else:
-        parts = [run(s) for s in range(seeds)]
+        for s in range(seeds):
+            parts.append(_run_logged(s, seeds))
+            progress("digits", s + 1, seeds, t0)
+    parts.sort(key=lambda d: d.seed.iloc[0])
     return flag(pd.concat(parts, ignore_index=True), {"digits_vit": N_TOK})
 
 

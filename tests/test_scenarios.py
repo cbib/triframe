@@ -35,6 +35,8 @@ def value(name, group, method):
 
 
 def noise_never_flagged(name, methods):
+    """Regression check of the rule only: reference noise cannot be flagged by construction.
+    Evidence about false positives is in test_noise_validation.py and the held-out groups."""
     df = scores(name)
     r = df[df.is_noise & df.method.isin(methods)]
     assert not r.flagged.any(), r[r.flagged][["group", "method", "score"]]

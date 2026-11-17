@@ -41,11 +41,15 @@ def assert_self_patch_is_identity(adapter, batch, reg):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("model", ["mlp", "rf"])
-def test_breast_cancer_models_are_accurate_and_noise_is_never_flagged(model):
+def test_breast_cancer_models_are_accurate_and_held_out_noise_is_mostly_unflagged(model):
+    # `noise` is the reference of the rule and cannot be flagged by construction; the held-out
+    # groups noise2/noise3 are judged by the same rule and can be (a few false positives are
+    # expected: the rates over 10 seeds are in docs/validation.md and noise_validation.csv).
     df = bc_scores(model)
     assert df.test_accuracy.iloc[0] > 0.9
-    noise = df[df.group == "noise"]
-    assert not noise.flagged.any(), noise[noise.flagged][["method", "score"]]
+    held = df[df.heldout & (df.question == "model_use")]
+    assert set(held.group) == {"noise2", "noise3"} and not held.is_noise.any()
+    assert held.flagged.mean() <= 0.25, held[held.flagged][["group", "method", "score"]]
 
 
 @pytest.mark.parametrize("model", ["mlp", "rf"])
@@ -101,10 +105,12 @@ def digits_scores():
     return flag(dv.run(0), {"digits_vit": dv.N_TOK})
 
 
-def test_digits_noise_patches_never_flagged_and_model_is_accurate(digits_scores):
+def test_digits_held_out_noise_patches_mostly_unflagged_and_model_is_accurate(digits_scores):
+    # n1, n2 are the reference; n3, n4 are held out, so their flags are real evidence.
     assert digits_scores.test_accuracy.iloc[0] > 0.9
-    noise = digits_scores[digits_scores.is_noise]
-    assert not noise.flagged.any(), noise[noise.flagged][["group", "method", "score"]]
+    held = digits_scores[digits_scores.heldout]
+    assert set(held.group) == {"n3", "n4"} and not held.is_noise.any()
+    assert held.flagged.mean() <= 0.1, held[held.flagged][["group", "method", "score"]]
 
 
 def test_digits_centre_patches_are_used_and_corners_are_not(digits_scores):

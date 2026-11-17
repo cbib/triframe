@@ -3,9 +3,13 @@ Wisconsin breast-cancer data (scikit-learn, bundled). The model has no
 feature-group structure; the adapter patches input groups directly.
 
 Real groups: mean, error, worst (10 features each). Optional injected groups
-with known status: `noise` (unused) and `worst_copy` (redundant with worst)."""
+with known status: `noise` (unused; the noise reference of the decision rule),
+`worst_copy` (redundant with worst), and `noise2`, `noise3` (unused, held out:
+never part of the reference, so their flag rate is a false-positive rate)."""
 
 from __future__ import annotations
+
+import time
 
 from typing import Dict, List
 
@@ -19,7 +23,8 @@ from ..data.tokens import BlockMeta, FeatureMeta, TokenRegistry
 from .validation import flag, label_info_scores, model_use_scores
 
 REAL = ["mean", "error", "worst"]
-INJECTED = ["noise", "worst_copy"]
+HELDOUT = ["noise2", "noise3"]
+INJECTED = ["noise", "worst_copy"] + HELDOUT
 D = 10
 
 
@@ -40,6 +45,8 @@ def load(seed: int, inject: bool = True):
         if inject:
             g["noise"] = rng.standard_normal((len(M), D))
             g["worst_copy"] = g["worst"] + 0.1 * rng.standard_normal((len(M), D))
+            for h in HELDOUT:
+                g[h] = rng.standard_normal((len(M), D))
         return g
 
     return groups(Xtr), ytr, groups(Xte), yte
@@ -126,12 +133,15 @@ def fit_rf(batch, y, seed):
         batch["x"].numpy(), y)
 
 
-def run(seed: int, inject: bool = True, model: str = "mlp") -> pd.DataFrame:
-    """model: "mlp" (PyTorch) or "rf" (random forest; no gradients, no attention)."""
+def run(seed: int, inject: bool = True, model: str = "mlp", say=None) -> pd.DataFrame:
+    """model: "mlp" (PyTorch) or "rf" (random forest; no gradients, no attention).
+    say(text): optional status callback, called at the start of each step."""
+    say = say or (lambda text: None)
     Gtr, ytr, Gte, yte = load(seed, inject)
     tokens = list(Gtr)
     reg = build_registry(tokens)
     btr, bte = to_batch(Gtr, tokens), to_batch(Gte, tokens)
+    say("training model")
     fitted = fit_mlp(btr, ytr, seed) if model == "mlp" else fit_rf(btr, ytr, seed)
     adapter = InputGroupAdapter(fitted, reg)
     with torch.no_grad():
@@ -141,24 +151,33 @@ def run(seed: int, inject: bool = True, model: str = "mlp") -> pd.DataFrame:
     if inject:
         groups.append(("worst", "worst_copy"))
     groups.append(tuple(REAL))
+    say("model-use scores (ablation, patching, gradients)")
     use = model_use_scores(adapter, reg, bte, yte, btr["x"].mean(0), groups, seed)
     if model == "rf":
         imp = fitted.feature_importances_
         for g in groups:
             use[g]["rf_impurity"] = float(imp[[i for t in g for i in reg.indices_for_subgroup(t)]].sum())
+    say("label-information scores (Fréchet, Cohen's d, probes)")
     rows = []
     for g in groups:
         info = label_info_scores(Gtr, ytr, Gte, yte, tokens, g, seed)
         for q, sc in (("label_info", info), ("model_use", use[g])):
             for m, v in sc.items():
                 rows.append(dict(scenario=f"breast_cancer_{model}", seed=seed, group="+".join(g),
-                                 is_noise=g == ("noise",), joint=len(g) > 1, question=q,
+                                 is_noise=g == ("noise",), joint=len(g) > 1,
+                                 heldout=len(g) == 1 and g[0] in HELDOUT, question=q,
                                  method=m, score=v, truth=np.nan, test_accuracy=acc))
     return pd.DataFrame(rows)
 
 
 def run_all(seeds: int = 10, inject: bool = True, model: str = "mlp") -> pd.DataFrame:
-    df = pd.concat([run(s, inject, model) for s in range(seeds)], ignore_index=True)
+    from .validation import progress, stage
+    parts, t0 = [], time.time()
+    for s in range(seeds):
+        label = f"breast cancer {model} seed {s + 1}/{seeds}"
+        parts.append(run(s, inject, model, say=lambda t, label=label: stage(label, t)))
+        progress(f"breast cancer {model}", s + 1, seeds, t0)
+    df = pd.concat(parts, ignore_index=True)
     return flag(df, {f"breast_cancer_{model}": len(REAL) + (len(INJECTED) if inject else 0)})
 
 

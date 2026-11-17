@@ -27,7 +27,7 @@ python -m triframe.examples.validation --seeds 10 --out validation_out
 python -m triframe.examples.breast_cancer --seeds 10 --out validation_out   # about 3 min
 python -m triframe.examples.digits_vit --seeds 10 --out validation_out      # about 8 min
 
-# Section 5 in one go, plus the figure real_data_flagged.png (about 10 min)
+# Section 5 in one go, plus the figure real_breast_cancer.png (about 10 min)
 python -m triframe.examples.validation --real --seeds 10 --out validation_out
 
 # Tests (the scenario and digits tests take a few minutes)
@@ -43,10 +43,12 @@ Outputs in `validation_out/`:
 | `validation_agreement.png` | Figure 1 |
 | `model_test_accuracy.csv` | test accuracy of each scenario's model |
 | `real_breast_cancer_mlp.csv`, `real_breast_cancer_rf.csv`, `real_digits_vit.csv` | the same scores for the real-data examples |
-| `real_data_flagged.png` | Figure 2 |
+| `real_breast_cancer.png` | Figure 2 |
+| `real_digits_patches.png` | digits patches (supplement) |
+| `noise_validation.csv`, `noise_validation.png` | false-positive rates on held-out and cross-fit noise (section 7) |
 
 `triframe/examples/README.md` lists the same commands with the example files.
-Copies of the two figures are committed in `docs/figures/`.
+Copies of the figures are committed in `docs/figures/`. `python -m triframe.examples.figures --in validation_out [--tiff]` redraws all figures from the CSVs (PDF, PNG, optional 350 dpi TIFF).
 
 ## 1. The idea
 
@@ -242,7 +244,7 @@ The scenarios above have designed truth but are synthetic. Three examples on
 real data check that the same pipeline works on models and data it was not
 built around. Code: `triframe/examples/breast_cancer.py` and `digits_vit.py`;
 tests: `tests/test_real_data.py`; scores: `validation_out/real_*.csv`;
-Figure 2: `real_data_flagged.png`. Same decision rule as before, 10 seeds
+Figure 2: `real_breast_cancer.png`. Same decision rule as before, 10 seeds
 (each seed is a new train/test split and model).
 
 **Data sources**
@@ -283,8 +285,10 @@ pages ([Breast Cancer Wisconsin (Diagnostic)](https://archive.ics.uci.edu/datase
   use the margin of the predicted class.
 
 **What the tests assert (and why)**
-- *Noise is never flagged* (all three examples, every method): the one
-  hard-truth check on real data.
+- *Held-out noise is not flagged* (all three examples, every method): breast
+  cancer has two held-out noise groups (`noise2`, `noise3`) and digits two
+  (`n3`, `n4`), never part of the noise reference. Flagging the reference
+  noise itself is impossible by construction, so it is not evidence.
 - *Self-patching is the identity* (each adapter): replacing a sample's
   groups with its own must not change the output. This catches adapter
   bugs (wrong column order, wrong shape) before any result is trusted.
@@ -303,30 +307,32 @@ Thresholds are coarse on purpose: they should hold across seeds and machines.
 
 **Findings (10 seeds)**
 
-*Breast cancer.* Test accuracy 0.967 (MLP), 0.959 (forest). All real groups
-carry label information; the noise group is never flagged. For model use the
-two models differ on identical data: the MLP uses `mean` and `worst`
-(patching flags them in 90–100% of seeds), while the forest relies almost
-only on `worst` and its copy (`mean` flagged in 30% of seeds, `error`
-in 0%). The forest's impurity importance flags `mean` and `error` in 100% and
-90% of seeds, so it disagrees with patching: impurity reflects how often the
-trees split on a group, not what changes predictions. Single-group ablation is
-weak for both (flagged in 20–40% of seeds) because `mean`, `worst` and the
-copy are near-duplicates; replacing `worst` and its copy together flips 32%
-(MLP) and 44% (forest) of predictions against 9–14% for either alone.
+*Breast cancer.* Test accuracy 0.956 (MLP and forest). All real groups carry
+label information. For model use the two models differ on identical data: the
+MLP uses `mean` and `worst` (patching flags them in 100% of seeds; `error`
+in 30%), while the forest relies almost only on `worst` and its copy (`mean`
+flagged in 30% of seeds, `error` in 10%). The forest's impurity importance
+flags all three real groups in 100% of seeds, so it disagrees with patching:
+impurity reflects how often the trees split on a group, not what changes
+predictions. Single-group ablation is weak for both (flagged in 10-50% of
+seeds) because `mean`, `worst` and the copy are near-duplicates; replacing
+`worst` and its copy together flips 33% (MLP) and 44% (forest) of predictions
+against 9-13% for either alone.
 
-*Digits.* Test accuracy 0.943 (SD 0.014). Both probes flag every real patch
-(AUC 0.60–0.91), so all patches carry some information. The model uses the
-centre: replacing the four centre patches flips 66.5% of predictions and
-ablating them costs 0.49 accuracy. The four corner patches are informative
-together (AUC 0.87) but unused (patching 3.6% flips, ablation drop 0.004,
-against 1.4% flips for noise): informative but unused, on real data.
+*Digits.* Test accuracy 0.945 (SD 0.008). Both probes flag every real patch
+(AUC 0.59-0.91), so all patches carry some information. The model uses the
+centre: replacing the four centre patches flips 61% of predictions and
+ablating them costs 0.44 accuracy. The four corner patches are informative
+together (AUC 0.85-0.87) but unused (patching 3.5% flips, ablation drop 0.012,
+against 1.0% flips for noise): informative but unused, on real data.
 Patching and ablation agree on most patches. Integrated gradients flags more
-peripheral patches (p20 and p23 in all seeds, p33 in half). Attention separates
-patches poorly: weights range only from 0.035 to 0.088, no single patch is
-flagged in more than 30% of seeds, and the second most used patch by ablation
-(p21, accuracy drop 0.099) is never flagged and gets less weight (0.048) than
-p02, p22 and p31 (0.059–0.062), which matter much less (drops 0.024–0.028).
+peripheral patches. Attention separates patches poorly: weights range only
+from 0.035 to 0.074 and only one patch is flagged in more than 30% of seeds.
+
+![triframe on handwritten digits with a vision transformer that reads each 8x8 image as a 4x4 grid of 2x2-pixel patches.](docs/figures/real_digits_patches.png)
+
+*Noise (all three examples).* The reference noise groups cannot be flagged by
+construction. The held-out groups can, and a few are: see section 7.
 
 **Limitations revealed**
 - *Fréchet distance on sparse pixels.* The nearly blank patch p30 has the
@@ -360,3 +366,44 @@ p02, p22 and p31 (0.059–0.062), which matter much less (drops 0.024–0.028).
 - **Ablation uses mean replacement and attributions use the training mean as
   baseline.** Other choices (zero, resampling) could change those methods'
   results.
+
+## 7. Noise validation (false positives)
+
+The decision rule flags a group only above twice the largest noise score of
+the same run, so the groups that set that threshold (the *reference* noise)
+cannot be flagged by construction; their 0% says nothing. Noise validation
+therefore uses noise the rule was not calibrated on. Code:
+`triframe/examples/noise_validation.py`; scores: `validation_out/noise_validation.csv`;
+figure: supplementary noise-validation figure.
+
+- **Held out.** Groups never used as the reference: `Z1`, `Z2` (unused,
+  off-scale) in the `irrelevant` scenario; `noise2`, `noise3` in breast cancer;
+  `n3`, `n4` in digits. The rule is applied to them like to any group, so
+  their flag rate is a false-positive rate.
+- **Cross-fit.** Each reference noise group judged against the *other*
+  references only (scenarios: N1-N3; digits: n1, n2). The threshold comes from
+  fewer groups than in production, so this is an upper bound.
+- Reported per method: false positives / trials (seeds x groups), exact
+  (Clopper-Pearson) 95% interval, seeds with at least one false positive.
+  Trials of one seed share a model, so the intervals are approximate.
+
+| Dataset (10 seeds) | Kind | Trials per method | False positives (worst methods) |
+|---|---|---|---|
+| Scenarios | held out | 20 | attention 1/20; all others 0/20 |
+| Scenarios | cross-fit | 210 | gradient x input 9/210 (4.3%), attention 8/210 (3.8%), GB probe 1/210, integrated gradients 1/210; Frechet, Cohen's d, linear probe, ablation, patching 0/210 |
+| Breast cancer, MLP | held out | 20 | linear probe 5/20, GB probe 3/20, Cohen's d 2/20, patching 2/20; others 0/20 |
+| Breast cancer, forest | held out | 20 | linear probe 5/20, GB probe 3/20, Cohen's d 2/20; others 0/20 |
+| Digits | held out | 20 | GB probe 1/20; others 0/20 |
+| Digits | cross-fit | 20 | 0/20 for every method |
+
+![False-positive rates on noise groups the decision rule was not calibrated on.](docs/figures/noise_validation.png)
+
+What this means: on the large synthetic and digits data the rule's false-positive
+rate is low (at most 5% for any method, mostly 0). On breast cancer, with only
+171 test samples, the probe floors (0.03 AUC above chance) are too low: a noise
+group reaches an AUC that high by chance in 10-25% of seeds. Patching, ablation
+and Frechet distance are the most conservative. The Q1 results for real groups
+(100% flagged) are unaffected, but a flag from a probe on a small test set
+should be read with this rate in mind. The floor is a choice; a floor that
+scales with the test-set size, or more than one reference noise group, would
+lower it.

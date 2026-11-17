@@ -9,6 +9,7 @@ separately generated test data.
 from __future__ import annotations
 
 import argparse
+import time
 import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -29,6 +30,9 @@ USE_METHODS = ["attention", "ablation", "patch_flip", "grad_x_input", "integrate
 FLOOR = {"rf_impurity": 0.0, "frechet": 0.05, "cohen_d": 0.10, "linear_probe": 0.03, "gb_probe": 0.03,
          "attention": 0.03, "ablation": 0.01, "patch_flip": 0.03,
          "grad_x_input": 0.0, "integrated_gradients": 0.0}
+# Groups never used as the noise reference: the rule is applied to them like to any group, so their
+# flag rate measures false positives (see noise_validation.py). Z1/Z2: unused but off-scale.
+HELDOUT = {"irrelevant": ("Z1", "Z2")}
 REL_FLOOR = 0.10   # also require >10% of the scenario's largest excess score
 
 
@@ -184,6 +188,7 @@ def run_scenario(sc: Scenario, seed: int) -> pd.DataFrame:
             for m, v in scores.items():
                 rows.append(dict(scenario=sc.name, seed=seed, group="+".join(g),
                                  is_noise=g[0] in NOISE, joint=len(g) > 1,
+                                 heldout=len(g) == 1 and g[0] in HELDOUT.get(sc.name, ()),
                                  question=q, method=m, score=v, truth=truth,
                                  test_accuracy=acc))
     return pd.DataFrame(rows)
@@ -209,14 +214,28 @@ def flag(df: pd.DataFrame, n_tokens: Dict[str, int]) -> pd.DataFrame:
     return df
 
 
+def progress(label: str, done: int, total: int, t0: float) -> None:
+    """One status line: label, done/total, elapsed and estimated time left."""
+    el = time.time() - t0
+    eta = el / done * (total - done) if done else 0.0
+    bar = "#" * (20 * done // total)
+    print(f"[{label}] {bar:<20} {done}/{total}  {el / 60:.1f} min elapsed, "
+          f"~{eta / 60:.1f} min left", flush=True)
+
+
+def stage(label: str, text: str) -> None:
+    """Print one status line for the step now running."""
+    print(f"[{label}] {text}", flush=True)
+
+
 def run_all(seeds: int, scenarios=None) -> pd.DataFrame:
     parts = []
-    for name, sc in SCENARIOS.items():
-        if scenarios and name not in scenarios:
-            continue
+    todo = [(n, sc) for n, sc in SCENARIOS.items() if not scenarios or n in scenarios]
+    t0 = time.time()
+    for name, sc in todo:
         for s in range(seeds):
             parts.append(run_scenario(sc, s))
-            print(f"{name} seed {s} done", flush=True)
+            progress(f"{name} seed {s}", len(parts), len(todo) * seeds, t0)
     df = pd.concat(parts, ignore_index=True)
     return flag(df, {n: len(sc.tokens) for n, sc in SCENARIOS.items()})
 
