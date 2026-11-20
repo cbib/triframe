@@ -145,7 +145,10 @@ Tests, results and every command to reproduce them are in
 ## Origin, development, citation
 
 triframe is the domain-independent core of the analysis in a lncRNA/mRNA
-classifier (β-LNC, manuscript in preparation).
+classifier, [β-LNC](https://github.com/cbib/beta_vae_lnclassifier) (manuscript in preparation),
+which is its case study. That repository holds the data pipeline and the checks that triframe,
+driven through an independent adapter, reproduces the β-LNC results (`analysis/triframe/`,
+`scripts/triframe_equivalence.sh`).
 
 ```bash
 pip install -e ".[dev]" && pytest tests/ -v
